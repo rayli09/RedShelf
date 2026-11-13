@@ -64,8 +64,10 @@ private final class FeedModel: ObservableObject {
             sessionState = .signedIn
             accounts = [Account(id: "fixture-a", name: "测试账号一", isActive: true), Account(id: "fixture-b", name: "测试账号二", isActive: false)]
             notes = (0..<12).map { index in
-                FeedNote(id: "fixture-\(index)", title: "测试笔记 \(index + 1)", author: "测试作者", cover: nil,
-                         avatar: nil, likes: "24", isVideo: index < 3, accessToken: "", source: "pc_feed")
+                let longTitle = ProcessInfo.processInfo.arguments.contains("--ui-testing-masonry") && index < 2
+                let title = longTitle ? "测试笔记 \(index + 1)：这里是一段用于验证不同列排版的较长标题" : "测试笔记 \(index + 1)"
+                return FeedNote(id: "fixture-\(index)", title: title, author: "测试作者", cover: nil,
+                                avatar: nil, likes: "24", isVideo: index < 3, accessToken: "", source: "pc_feed")
             }
             return
         }
@@ -420,16 +422,8 @@ struct RootView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 80) {
-                        ForEach(model.notes) { note in
-                            Button { selectedNote = note } label: { NoteCard(note: note) }
-                                .buttonStyle(.card)
-                                .accessibilityIdentifier("note.\(note.id)")
-                                .onAppear {
-                                    if note.id == model.notes.last?.id { Task { await model.loadMore() } }
-                                }
-                        }
-                    }.padding(.horizontal, 48).padding(.top, 20).padding(.bottom, 90)
+                    NoteGrid(notes: model.notes, select: { selectedNote = $0 }, onLastAppear: { Task { await model.loadMore() } })
+                        .padding(.horizontal, 48).padding(.top, 20).padding(.bottom, 90)
                     if model.loadingMore { ProgressView().padding() }
                     if let error = model.paginationError {
                         VStack {
@@ -504,11 +498,7 @@ private struct ProfileView: View {
                 } else if notes.isEmpty && !loading {
                     Text("暂无内容").foregroundStyle(.secondary)
                 }
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 80) {
-                    ForEach(notes) { note in
-                        Button { selectedNote = note } label: { NoteCard(note: note) }.buttonStyle(.card)
-                    }
-                }
+                NoteGrid(notes: notes, select: { selectedNote = $0 })
                 if loading { ProgressView() }
                 if hasMore && !loading && error == nil { Button("加载更多") { Task { await load(reset: false) } } }
             }.padding(.horizontal, 48).padding(.bottom, 80)
@@ -1031,12 +1021,7 @@ private struct SearchView: View {
                         }.accessibilityIdentifier("search.user.\(user.id)")
                     }
                 }
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 80) {
-                    ForEach(model.notes) { note in
-                        Button { selectedNote = note } label: { NoteCard(note: note) }.buttonStyle(.card)
-                            .accessibilityIdentifier("note.\(note.id)")
-                    }
-                }
+                NoteGrid(notes: model.notes, select: { selectedNote = $0 })
                 if model.loading { ProgressView() }
                 if model.hasMore && !model.loading && model.error == nil {
                     Button("加载更多") { model.loadMore() }
@@ -1075,9 +1060,7 @@ private struct UserSearchProfileView: View {
                 Text("笔记").font(.title3.bold())
                 if let error { Text(error).foregroundStyle(.secondary); Button("重试") { Task { await load() } } }
                 else if notes.isEmpty && !loading { Text("暂无公开笔记").foregroundStyle(.secondary) }
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 80) {
-                    ForEach(notes) { note in Button { selectedNote = note } label: { NoteCard(note: note) }.buttonStyle(.card) }
-                }
+                NoteGrid(notes: notes, select: { selectedNote = $0 })
                 if loading { ProgressView() }
                 if hasMore && !loading && error == nil { Button("加载更多") { Task { await load() } } }
             }.padding(48)
@@ -1454,6 +1437,27 @@ private struct CommentThreadView: View {
     }
 }
 
+private struct NoteGrid: View {
+    let notes: [FeedNote]
+    let select: (FeedNote) -> Void
+    var onLastAppear: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 48) {
+            ForEach(0..<4, id: \.self) { column in
+                LazyVStack(spacing: 80) {
+                    ForEach(Array(notes.enumerated()).filter { $0.offset % 4 == column }, id: \.element.id) { entry in
+                        Button { select(entry.element) } label: { NoteCard(note: entry.element) }
+                            .buttonStyle(.card)
+                            .accessibilityIdentifier("note.\(entry.element.id)")
+                            .onAppear { if entry.offset == notes.count - 1 { onLastAppear?() } }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .top)
+            }
+        }
+    }
+}
+
 private struct NoteCard: View {
     let note: FeedNote
     var body: some View {
@@ -1464,7 +1468,6 @@ private struct NoteCard: View {
                     if note.isVideo { Image(systemName: "play.circle.fill").padding(14) }
                 }
             Text(note.title).font(.system(size: 24, weight: .semibold)).lineLimit(2)
-                .frame(height: 60, alignment: .topLeading)
             HStack(spacing: 8) {
                 AsyncImage(url: note.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
                     .frame(width: 28, height: 28).clipShape(Circle())

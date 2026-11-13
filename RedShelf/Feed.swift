@@ -211,7 +211,7 @@ enum FeedParser {
 
     static func parseHomeFeed(_ result: [String: Any], source: String = "pc_feed") throws -> [FeedNote] {
         guard let items = result["items"] as? [[String: Any]] else { throw FeedError.invalidResponse }
-        return items.compactMap { item in
+        let parsed: [FeedNote] = items.compactMap { item in
             guard let card = item["note_card"] as? [String: Any] else { return nil }
             let id = [item["id"] as? String, card["note_id"] as? String].compactMap { $0 }.first { !$0.isEmpty }
             guard let id else { return nil }
@@ -231,6 +231,8 @@ enum FeedParser {
                             isVideo: card["type"] as? String == "video",
                             accessToken: token, source: source)
         }
+        var seen = Set<String>()
+        return parsed.filter { seen.insert($0.id).inserted }
     }
 
     private static func usableMediaURL(_ value: String?) -> URL? {

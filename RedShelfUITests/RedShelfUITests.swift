@@ -22,6 +22,27 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 10), "Returning should show the recommendation grid")
     }
 
+    func testRecommendationColumnsAdaptToTitleHeight() {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-masonry"]
+        app.launch()
+        let first = app.buttons["note.fixture-0"]
+        let secondRowLong = app.buttons["note.fixture-4"]
+        let secondRowShort = app.buttons["note.fixture-6"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        XCTAssertTrue(secondRowLong.waitForExistence(timeout: 10))
+        XCTAssertTrue(secondRowShort.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(secondRowLong.frame.minY, secondRowShort.frame.minY + 10, "Columns should follow their own content height")
+        XCUIRemote.shared.press(.down)
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.fixture-"))
+        let before = cards.allElementsBoundByIndex.first { $0.hasFocus }?.identifier
+        XCTAssertNotNil(before)
+        XCUIRemote.shared.press(.right)
+        let after = cards.allElementsBoundByIndex.first { $0.hasFocus }?.identifier
+        XCTAssertNotNil(after)
+        XCTAssertNotEqual(before, after, "Remote should move across columns")
+    }
+
     func testDetailImagesAndCommentsAreReachable() {
         app.terminate()
         app.launchArguments = ["--ui-testing", "--ui-testing-detail-images"]
