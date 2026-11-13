@@ -117,9 +117,42 @@ private struct AuthFlowChecks {
         try await signOutInvalidatesInFlightResponse()
         try await switchInvalidatesOldAccountResponse()
         try await switchesBetweenIsolatedAccounts()
+        try await refreshedCookiesSurviveAccountSwitchAndRestart()
         try await profileIdentityAndNameAreSafe()
         try await expiredCodeMustNotPersist()
         print("QR login flow checks passed")
+    }
+
+    private static func refreshedCookiesSurviveAccountSwitchAndRestart() async throws {
+        var vault = try testVault(StoredSession(cookies: ["a1": "test", "webId": "test", "web_session": "old"], sessionKey: nil))
+        try vault.save(SavedAccount(id: "other", name: "Other", session: StoredSession(cookies: ["a1": "other", "webId": "other", "web_session": "other"], sessionKey: nil)))
+        _ = try vault.activate(id: "test-user")
+        var saved = vault
+        var requestCount = 0
+        MockServer.handler = { request in
+            requestCount += 1
+            let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+            let expected = requestCount <= 2 ? "old" : (requestCount == 3 ? "other" : "renewed")
+            try expect(cookie.contains("web_session=\(expected)"), "wrong session after cookie rotation")
+            if requestCount == 1 { return (200, #"{"success":false,"code":-1}"#) }
+            return (200, #"{"success":true,"data":{"items":[]}}"#)
+        }
+        MockServer.responseHeaders = { _ in requestCount <= 2 ? ["Set-Cookie": "web_session=renewed; Domain=.xiaohongshu.com; Path=/; Secure"] : [:] }
+        defer { MockServer.responseHeaders = nil }
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Generated/WebSigner.js")
+        let client = try SignedClient(session: session(), initialVault: vault, saveVault: { saved = $0 }, signerScriptURL: script)
+        do { _ = try await client.homeFeed(); throw TestFailure.failed("failed response accepted") }
+        catch is TestFailure { throw TestFailure.failed("failed response accepted") }
+        catch { }
+        try expect(saved.active?.session.cookies["web_session"] == "old", "failed response persisted cookies")
+        _ = try await client.homeFeed()
+        try expect(saved.active?.session.cookies["web_session"] == "renewed", "rotated session was not persisted")
+        try await client.switchAccount(id: "other")
+        _ = try await client.homeFeed()
+        try await client.switchAccount(id: "test-user")
+        _ = try await client.homeFeed()
+        let restored = try SignedClient(session: session(), initialVault: saved, saveVault: { _ in }, signerScriptURL: script)
+        _ = try await restored.homeFeed()
     }
 
     private static func overseasGuestIsNeverSavedAsAccount() async throws {

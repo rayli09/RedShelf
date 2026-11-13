@@ -621,8 +621,19 @@ actor SignedClient {
             if let key = element.key as? String, let value = element.value as? String { output[key] = value }
         }
         let cookieDomain = region == .rednote ? "rednote.com" : "xiaohongshu.com"
+        let previousCookies = cookies
         for cookie in HTTPCookie.cookies(withResponseHeaderFields: responseHeaders, for: url) where cookie.domain == cookieDomain || cookie.domain.hasSuffix("." + cookieDomain) {
             cookies[cookie.name] = cookie.value
+        }
+        if authenticated, cookies != previousCookies, var account = vault.active {
+            account.session = StoredSession(cookies: cookies, sessionKey: sessionKey, region: region)
+            var next = vault
+            do {
+                try next.save(account)
+                vault = next
+                do { try saveVault(next) }
+                catch { log("event=account_session_save_failed") }
+            } catch { log("event=account_session_invalid") }
         }
         return data
     }
