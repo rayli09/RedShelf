@@ -62,30 +62,16 @@ struct RootView: View {
     @StateObject private var model = FeedModel()
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             Color(red: 0.08, green: 0.08, blue: 0.08).ignoresSafeArea()
-            VStack(spacing: 0) {
-                navigation.padding(.top, 24).padding(.bottom, 28)
-                Group {
-                    switch page {
-                    case .recommendations:
-                        switch model.sessionState {
-                        case .checking: ProgressView()
-                        case .signedOut: login
-                        case .signedIn: feed
-                        }
-                    case .video: unavailable("视频", "视频流正在开发中")
-                    case .live: unavailable("直播", "直播正在开发中")
-                    case .search: unavailable("搜索", "搜索正在开发中")
-                    case .profile:
-                        switch model.sessionState {
-                        case .checking: ProgressView()
-                        case .signedOut: login
-                        case .signedIn: unavailable("我的", "个人资料正在开发中")
-                        }
-                    case .settings: unavailable("设置", "暂无可用设置")
-                    }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity).focusSection()
+            TabView(selection: $page) {
+                ForEach(Page.allCases, id: \.self) { item in
+                    content(for: item)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .focusSection()
+                        .tabItem { Label(item.rawValue, systemImage: item.symbol) }
+                        .tag(item)
+                }
             }
         }
         .preferredColorScheme(.dark)
@@ -100,20 +86,26 @@ struct RootView: View {
         }
     }
 
-    private var navigation: some View {
-        HStack(spacing: 4) {
-            ForEach(Page.allCases, id: \.self) { item in
-                Button { page = item } label: {
-                    Label(item.rawValue, systemImage: item.symbol)
-                        .font(.system(size: 23, weight: .semibold))
-                        .padding(.horizontal, 18).padding(.vertical, 10)
-                        .foregroundStyle(page == item ? .black : .white)
-                        .background(page == item ? Color.white : Color.clear, in: Capsule())
-                }.buttonStyle(.plain)
+    @ViewBuilder
+    private func content(for page: Page) -> some View {
+        switch page {
+        case .recommendations:
+            switch model.sessionState {
+            case .checking: ProgressView()
+            case .signedOut: login
+            case .signedIn: feed
             }
+        case .video: unavailable("视频", "视频流正在开发中")
+        case .live: unavailable("直播", "直播正在开发中")
+        case .search: unavailable("搜索", "搜索正在开发中")
+        case .profile:
+            switch model.sessionState {
+            case .checking: ProgressView()
+            case .signedOut: login
+            case .signedIn: unavailable("我的", "个人资料正在开发中")
+            }
+        case .settings: unavailable("设置", "暂无可用设置")
         }
-        .padding(5)
-        .background(Color.white.opacity(0.07), in: Capsule())
     }
 
     private var feed: some View {
