@@ -1,41 +1,41 @@
 # RedShelf
 
-An experimental native Apple TV client inspired by public Rouge App Store screenshots. It is not affiliated with Xiaohongshu or Rouge.
+[![tvOS 16+](https://img.shields.io/badge/tvOS-16%2B-000000?logo=apple)](https://developer.apple.com/tvos/)
+[![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/rayli09/RedShelf?style=flat&logo=github)](https://github.com/rayli09/RedShelf/stargazers)
 
-The source code is available under the [MIT License](LICENSE). Third-party components retain their own licenses; see [notices](RedShelf/ThirdParty/NOTICE.txt). Product names and marks belong to their respective owners.
+An experimental native Xiaohongshu client for Apple TV. Browse recommendations, videos and notes, search, and switch accounts with the Siri Remote.
 
-**Status:** one RedNote account and one mainland account completed QR sign-in on a physical Apple TV, and the user observed a recommendation feed. Search, note details and playback still need real-device verification. Video, live, search and profile are incomplete; do not treat this as a feature-complete replacement yet.
+![RedShelf pixel artwork](Artwork/pixel-top-shelf.png)
 
-## Build and test
+QR sign-in and the recommendation feed have been observed on a physical Apple TV. Other features are still being verified; see the [roadmap](docs/roadmap.md).
 
-Requires Xcode, XcodeGen, Bun and Go 1.27.1 or newer:
+## Get started
+
+Requires macOS, Xcode, XcodeGen, Bun, Go 1.27.1+, and an Apple TV running tvOS 16 or later.
 
 ```sh
+git clone https://github.com/rayli09/RedShelf.git
+cd RedShelf
 ./scripts/build-signer.sh
 ./scripts/build-web-signer.sh
 xcodegen generate
-xcodebuild -scheme RedShelf -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO build
+open RedShelf.xcodeproj
+```
+
+In Xcode, choose your signing team and a unique bundle identifier, select your Apple TV, and run the app. Regenerating the project resets Xcode project changes.
+
+## Verify
+
+```sh
 swift test
 (cd Signer && go test ./...)
 ./scripts/test-auth-flow.sh
 ```
 
-Open `RedShelf.xcodeproj` and choose your own signing team and bundle identifier for a physical Apple TV. The XCFramework and Xcode project are generated locally and are not committed.
+See [implementation and UI tests](docs/implementation.md) for simulator commands, architecture, and references.
 
-The layered icon and static Top Shelf images are generated from `Artwork/pixel-top-shelf.png` by `scripts/generate-icon.swift`; run `swift scripts/generate-icon.swift` from the repository root after changing the artwork, then commit the resulting asset files.
+## License
 
-The JavaScriptCore signer bundles the MIT-licensed [`xhshow-ts`](https://github.com/ikenxuan/xhshow-ts) and Apache-licensed `@jspm/core` shims; dependency versions are fixed in `WebSigner/bun.lock` and license notices are in `RedShelf/ThirdParty`. The build-only polyfill plugin is deprecated; replace it when a maintained equivalent is verified. The native signing bridge uses [`tamnd/xiaohongshu-cli`](https://github.com/tamnd/xiaohongshu-cli), pinned in `Signer/go.mod` and licensed Apache-2.0. The build tool is the BSD-licensed [`netbirdio/gomobile-tvos-fork`](https://github.com/netbirdio/gomobile-tvos-fork), pinned in `scripts/build-signer.sh`. These unofficial interfaces may change without notice. Session data is intended to stay in the device Keychain; never add credentials or cookies to the repository.
-
-The QR polling, session completion and feed request shapes were cross-checked against [`jackwener/xiaohongshu-cli`](https://github.com/jackwener/xiaohongshu-cli) at commit `4d63f3c` and [Xiaohongshu's web login code](https://fe-platform-s10.rednotecdn.com/formula-static/xhs-pc-web/public/resource/js/async/Login.8458d1bf.js). The web code can treat QR polling as a completed login without always calling the separate completion endpoint; RedShelf checks the resulting account identity before accepting it.
-
-The web client's [regional routing code](https://fe-platform-s10.rednotecdn.com/formula-static/xhs-pc-web/public/resource/js/async/3375.8d7cb300.js) redirects certain confirmed accounts to RedNote. RedShelf creates a separate regional guest session and routes those accounts to RedNote; a confirmed RedNote login and recommendation feed have been observed on a physical Apple TV. Live browsing currently uses the Xiaohongshu domain and is unavailable for RedNote accounts.
-
-The live-feed request and public room data shapes were studied using [`catbus`](https://github.com/cv-cat/catbus) at `0048604` (MIT) and [`pure_live`](https://github.com/wzgrx/pure_live) at `ddd83cb` (AGPL-3.0). Live browsing and playback remain unverified against a real account and device; only public, unrestricted HLS streams are considered playable.
-
-`test-auth-flow.sh` uses an in-memory HTTP server and synthetic credentials to test waiting, scan, confirmation, identity mismatch, expiry, note details, comments and query encoding. It does not prove that the upstream service accepts the requests or that a real account can sign in.
-
-For remote-control UI checks, install a tvOS Simulator runtime and run `xcodebuild test -scheme RedShelf -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation) (at 1080p)' -only-testing:RedShelfUITests`. UI tests use debug-only synthetic fixtures and do not access an account.
-
-To verify actual simulator Keychain storage, use the same destination with `-only-testing:RedShelfTests/SecureSessionTests`. This creates and deletes a uniquely named item containing only synthetic account data; it does not read the app's account vault.
-
-Settings includes a native control for automatic playback of note videos. It is enabled by default and stored locally; live streams are unaffected.
+[MIT](LICENSE). Third-party components retain their own [licenses](RedShelf/ThirdParty/NOTICE.txt). RedShelf is independent and is not affiliated with Xiaohongshu or Rouge.
