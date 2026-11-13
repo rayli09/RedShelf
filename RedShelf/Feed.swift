@@ -9,6 +9,7 @@ struct FeedNote: Identifiable, Equatable {
     let likes: String
     let isVideo: Bool
     let accessToken: String
+    let source: String
 }
 
 struct NoteDetail {
@@ -17,6 +18,29 @@ struct NoteDetail {
     let author: String
     let images: [URL]
     let video: URL?
+    let liked: Bool?
+    let collected: Bool?
+    let likeCount: String
+    let commentCount: String
+}
+
+struct NoteComment: Identifiable, Equatable {
+    let id: String
+    let author: String
+    let avatar: URL?
+    let content: String
+    let likes: String
+}
+
+struct CommentPage {
+    let comments: [NoteComment]
+    let cursor: String
+    let hasMore: Bool
+}
+
+struct SearchPage {
+    let notes: [FeedNote]
+    let hasMore: Bool
 }
 
 enum QRLoginStatus: Equatable {
@@ -62,7 +86,7 @@ struct FeedService {
     func detail(for note: FeedNote) async throws -> NoteDetail {
         guard !note.accessToken.isEmpty else { throw FeedError.unavailable }
         var components = URLComponents(string: "https://www.xiaohongshu.com/explore/\(note.id)")!
-        components.queryItems = [URLQueryItem(name: "xsec_token", value: note.accessToken), URLQueryItem(name: "xsec_source", value: "pc_feed")]
+        components.queryItems = [URLQueryItem(name: "xsec_token", value: note.accessToken), URLQueryItem(name: "xsec_source", value: note.source)]
         guard let url = components.url else { throw FeedError.invalidResponse }
         var request = URLRequest(url: url)
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
@@ -75,6 +99,62 @@ struct FeedService {
 }
 
 enum FeedParser {
+    static func parseComments(_ result: [String: Any]) throws -> CommentPage {
+        guard let comments = result["comments"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        let parsed = comments.compactMap { comment -> NoteComment? in
+            guard let id = comment["id"] as? String, !id.isEmpty else { return nil }
+            let user = comment["user_info"] as? [String: Any] ?? [:]
+            let count = comment["like_count"]
+            return NoteComment(id: id, author: user["nickname"] as? String ?? "",
+                               avatar: (user["image"] as? String).flatMap(URL.init(string:)),
+                               content: comment["content"] as? String ?? "",
+                               likes: (count as? String) ?? (count as? NSNumber)?.stringValue ?? "")
+        }
+        return CommentPage(comments: parsed, cursor: result["cursor"] as? String ?? "",
+                           hasMore: result["has_more"] as? Bool ?? false)
+    }
+
+    static func parseAPIDetail(_ result: [String: Any]) throws -> NoteDetail {
+        guard let items = result["items"] as? [[String: Any]],
+              let note = items.first?["note_card"] as? [String: Any] else { throw FeedError.invalidResponse }
+        let user = note["user"] as? [String: Any] ?? [:]
+        let images = (note["image_list"] as? [[String: Any]] ?? []).compactMap { image in
+            ((image["url_default"] as? String) ?? (image["url"] as? String)).flatMap(URL.init(string:))
+        }
+        let video = note["video"] as? [String: Any]
+        let media = video?["media"] as? [String: Any]
+        let streams = media?["stream"] as? [String: Any]
+        let h264 = streams?["h264"] as? [[String: Any]] ?? []
+        let h265 = streams?["h265"] as? [[String: Any]] ?? []
+        let videoURL = ((h264.first ?? h265.first)?["master_url"] as? String).flatMap(URL.init(string:))
+        let interactions = note["interact_info"] as? [String: Any] ?? [:]
+        return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
+                          author: user["nickname"] as? String ?? "", images: images, video: videoURL,
+                          liked: interactions["liked"] as? Bool, collected: interactions["collected"] as? Bool,
+                          likeCount: countString(interactions["liked_count"]), commentCount: countString(interactions["comment_count"]))
+    }
+
+    static func parseHomeFeed(_ result: [String: Any], source: String = "pc_feed") throws -> [FeedNote] {
+        guard let items = result["items"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        return items.compactMap { item in
+            guard let card = item["note_card"] as? [String: Any],
+                  let id = (item["id"] as? String) ?? (card["note_id"] as? String), !id.isEmpty else { return nil }
+            let user = card["user"] as? [String: Any] ?? [:]
+            let cover = card["cover"] as? [String: Any] ?? [:]
+            let interaction = card["interact_info"] as? [String: Any] ?? [:]
+            let count = interaction["liked_count"]
+            let likes = (count as? String) ?? (count as? NSNumber)?.stringValue ?? ""
+            return FeedNote(id: id,
+                            title: (card["title"] as? String) ?? (card["display_title"] as? String) ?? "无标题",
+                            author: user["nickname"] as? String ?? "",
+                            cover: ((cover["url_default"] as? String) ?? (cover["url"] as? String)).flatMap(URL.init(string:)),
+                            avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
+                            likes: likes,
+                            isVideo: card["type"] as? String == "video",
+                            accessToken: (item["xsec_token"] as? String) ?? (card["xsec_token"] as? String) ?? "", source: source)
+        }
+    }
+
     static func parse(_ html: String) throws -> [FeedNote] {
         let root = try state(html)
         guard let feed = root["feed"] as? [String: Any], let items = feed["feeds"] as? [[String: Any]] else { throw FeedError.invalidResponse }
@@ -89,7 +169,7 @@ enum FeedParser {
                             cover: ((cover["urlDefault"] as? String) ?? (cover["url"] as? String)).flatMap(URL.init(string:)),
                             avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
                             likes: interactions["likedCount"] as? String ?? "",
-                            isVideo: card["type"] as? String == "video", accessToken: item["xsecToken"] as? String ?? "")
+                            isVideo: card["type"] as? String == "video", accessToken: item["xsecToken"] as? String ?? "", source: "pc_feed")
         }
     }
 
@@ -107,8 +187,15 @@ enum FeedParser {
         let streams = media?["stream"] as? [String: Any]
         let h264 = streams?["h264"] as? [[String: Any]] ?? []
         let videoURL = (h264.first?["masterUrl"] as? String).flatMap(URL.init(string:))
+        let interactions = note["interactInfo"] as? [String: Any] ?? [:]
         return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
-                          author: (user["nickname"] as? String) ?? (user["nickName"] as? String) ?? "", images: images, video: videoURL)
+                          author: (user["nickname"] as? String) ?? (user["nickName"] as? String) ?? "", images: images, video: videoURL,
+                          liked: interactions["liked"] as? Bool, collected: interactions["collected"] as? Bool,
+                          likeCount: countString(interactions["likedCount"]), commentCount: countString(interactions["commentCount"]))
+    }
+
+    private static func countString(_ value: Any?) -> String {
+        (value as? String) ?? (value as? NSNumber)?.stringValue ?? ""
     }
 
     private static func state(_ html: String) throws -> [String: Any] {

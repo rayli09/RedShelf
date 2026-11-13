@@ -53,3 +53,16 @@ func Headers(method, uri, body, cookiesJSON string) (string, error) {
 	data, err := json.Marshal(headers.Map())
 	return string(data), err
 }
+
+// QueryURI constructs a GET URI with exactly the escaping used by the signer.
+func QueryURI(path, paramsJSON string) (string, error) {
+	parsed, err := url.ParseRequestURI(path)
+	if err != nil || parsed.RawQuery != "" || parsed.Host != "" || parsed.Path == "" {
+		return "", errors.New("invalid request path")
+	}
+	var params map[string]string
+	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
+		return "", err
+	}
+	return xhssign.ContentString("GET", parsed.Path, params, ""), nil
+}

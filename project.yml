@@ -11,7 +11,10 @@ targets:
   RedShelf:
     type: application
     platform: tvOS
-    sources: [RedShelf]
+    sources:
+      - path: RedShelf
+      - path: Generated/WebSigner.js
+        buildPhase: resources
     dependencies:
       - framework: Frameworks/Signer.xcframework
         embed: false

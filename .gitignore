@@ -7,3 +7,6 @@ RedShelf.xcodeproj/
 
 .tools/
 Frameworks/
+
+WebSigner/node_modules/
+Generated/

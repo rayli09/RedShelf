@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "dependencies": {
+    "@ikenxuan/xhshow-ts": "1.2.0",
+    "esbuild": "0.25.12",
+    "esbuild-plugin-polyfill-node": "0.3.0"
+  }
+}

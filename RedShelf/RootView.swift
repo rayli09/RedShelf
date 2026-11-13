@@ -56,10 +56,82 @@ private final class FeedModel: ObservableObject {
     }
 }
 
+@MainActor
+private final class LoginModel: ObservableObject {
+    @Published private(set) var image: UIImage?
+    @Published private(set) var message = "正在生成二维码…"
+    @Published private(set) var failed = false
+    private var task: Task<Void, Never>?
+    private var generation = 0
+    private var hasStarted = false
+
+    func startIfNeeded(onSuccess: @escaping () -> Void) {
+        guard !hasStarted else { return }
+        hasStarted = true
+        start(onSuccess: onSuccess)
+    }
+
+    func retry(onSuccess: @escaping () -> Void) {
+        task?.cancel()
+        start(onSuccess: onSuccess)
+    }
+
+    private func start(onSuccess: @escaping () -> Void) {
+        generation += 1
+        let current = generation
+        image = nil
+        failed = false
+        message = "正在生成二维码…"
+        task = Task { [weak self] in
+            guard let self else { return }
+            var stage = "生成二维码"
+            do {
+                guard let client = SignedClient.shared else { throw FeedError.invalidResponse }
+                let challenge = try await client.beginLogin()
+                try Task.checkCancellation()
+                guard self.generation == current else { return }
+                let filter = CIFilter.qrCodeGenerator()
+                filter.message = Data(challenge.url.absoluteString.utf8)
+                filter.correctionLevel = "M"
+                guard let output = filter.outputImage, let cg = CIContext().createCGImage(output, from: output.extent) else { throw FeedError.invalidResponse }
+                self.image = UIImage(cgImage: cg)
+                self.message = "请使用小红书 App 扫码并确认"
+                stage = "检查登录状态"
+                for _ in 0..<90 {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    let progress = try await client.checkLogin(challenge)
+                    try Task.checkCancellation()
+                    guard self.generation == current else { return }
+                    switch progress {
+                    case .waiting: break
+                    case .scanned: self.message = "已扫码，请在手机上确认登录"
+                    case .authenticated:
+                        self.task = nil
+                        onSuccess()
+                        return
+                    }
+                }
+                self.image = nil
+                self.failed = true
+                self.message = "等待超时，请重新生成二维码"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.generation == current else { return }
+                self.image = nil
+                self.failed = true
+                self.message = "\(stage)失败：\(error.localizedDescription)"
+            }
+            if self.generation == current { self.task = nil }
+        }
+    }
+}
+
 struct RootView: View {
     @State private var page: Page = .recommendations
     @State private var selectedNote: FeedNote?
     @StateObject private var model = FeedModel()
+    @StateObject private var loginModel = LoginModel()
 
     var body: some View {
         ZStack {
@@ -80,7 +152,7 @@ struct RootView: View {
     }
 
     private var login: some View {
-        LoginView {
+        LoginView(model: loginModel) {
             page = .recommendations
             Task { await model.didLogIn() }
         }
@@ -97,7 +169,12 @@ struct RootView: View {
             }
         case .video: unavailable("视频", "视频流正在开发中")
         case .live: unavailable("直播", "直播正在开发中")
-        case .search: unavailable("搜索", "搜索正在开发中")
+        case .search:
+            switch model.sessionState {
+            case .checking: ProgressView()
+            case .signedOut: login
+            case .signedIn: SearchView(selectedNote: $selectedNote)
+            }
         case .profile:
             switch model.sessionState {
             case .checking: ProgressView()
@@ -140,61 +217,147 @@ struct RootView: View {
     }
 }
 
+private enum SearchFilter: String, CaseIterable {
+    case all = "全部", images = "图文", video = "视频"
+    var noteType: Int {
+        switch self { case .all: return 0; case .images: return 2; case .video: return 1 }
+    }
+}
+
+@MainActor
+private final class SearchModel: ObservableObject {
+    @Published var notes: [FeedNote] = []
+    @Published var loading = false
+    @Published var error: String?
+    @Published var searched = false
+    @Published var hasMore = false
+    private var searchTask: Task<Void, Never>?
+    private var generation = 0
+    private var page = 0
+    private var searchID = ""
+    private var activeKeyword = ""
+    private var activeFilter = SearchFilter.all
+
+    func search(keyword: String, filter: SearchFilter) {
+        let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        searchTask?.cancel()
+        generation += 1
+        let current = generation
+        activeKeyword = query
+        activeFilter = filter
+        page = 0
+        searchID = ""
+        hasMore = false
+        notes = []
+        searched = true
+        loading = true
+        error = nil
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let client = SignedClient.shared else { throw FeedError.invalidResponse }
+                let id = try await client.newSearchID()
+                let result = try await client.searchNotes(keyword: query, type: filter.noteType, page: 1, searchID: id)
+                try Task.checkCancellation()
+                guard self.generation == current else { return }
+                self.searchID = id
+                self.page = 1
+                self.notes = result.notes
+                self.hasMore = result.hasMore && !result.notes.isEmpty
+            } catch is CancellationError { return }
+            catch { if self.generation == current { self.error = "搜索失败，请重试" } }
+            if self.generation == current { self.loading = false }
+        }
+    }
+
+    func loadMore() {
+        guard !loading, hasMore, !searchID.isEmpty else { return }
+        let current = generation
+        let next = page + 1
+        let query = activeKeyword, filter = activeFilter, id = searchID
+        loading = true
+        error = nil
+        searchTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let client = SignedClient.shared else { throw FeedError.invalidResponse }
+                let result = try await client.searchNotes(keyword: query, type: filter.noteType, page: next, searchID: id)
+                try Task.checkCancellation()
+                guard self.generation == current else { return }
+                var seen = Set(self.notes.map(\.id))
+                let fresh = result.notes.filter { seen.insert($0.id).inserted }
+                self.notes.append(contentsOf: fresh)
+                self.page = next
+                self.hasMore = result.hasMore && !fresh.isEmpty
+            } catch is CancellationError { return }
+            catch { if self.generation == current { self.error = "加载更多失败，请重试" } }
+            if self.generation == current { self.loading = false }
+        }
+    }
+}
+
+private struct SearchView: View {
+    @Binding var selectedNote: FeedNote?
+    @StateObject private var model = SearchModel()
+    @State private var keyword = ""
+    @State private var filter = SearchFilter.all
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                Text("搜索").font(.title2.bold())
+                TextField("搜索笔记", text: $keyword)
+                    .onSubmit { model.search(keyword: keyword, filter: filter) }
+                HStack(spacing: 20) {
+                    ForEach(SearchFilter.allCases, id: \.self) { item in
+                        Button(item.rawValue) {
+                            filter = item
+                            if model.searched { model.search(keyword: keyword, filter: item) }
+                        }.buttonStyle(.bordered)
+                    }
+                }
+                if let error = model.error {
+                    Text(error).foregroundStyle(.secondary)
+                    Button("重试") {
+                        if model.notes.isEmpty { model.search(keyword: keyword, filter: filter) }
+                        else { model.loadMore() }
+                    }
+                } else if model.searched && model.notes.isEmpty && !model.loading {
+                    Text("没有找到相关笔记").foregroundStyle(.secondary)
+                }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 52) {
+                    ForEach(model.notes) { note in
+                        Button { selectedNote = note } label: { NoteCard(note: note) }.buttonStyle(.card)
+                    }
+                }
+                if model.loading { ProgressView() }
+                if model.hasMore && !model.loading && model.error == nil {
+                    Button("加载更多") { model.loadMore() }
+                }
+            }.padding(.horizontal, 120).padding(.bottom, 80)
+        }
+    }
+}
+
 private struct LoginView: View {
+    @ObservedObject var model: LoginModel
     let onSuccess: () -> Void
-    @State private var image: UIImage?
-    @State private var message = "正在生成二维码…"
-    @State private var failed = false
-    @State private var attempt = 0
 
     var body: some View {
         VStack(spacing: 24) {
             Text("登录小红书").font(.title.bold())
-            if let image {
+            if let image = model.image {
                 Image(uiImage: image).interpolation(.none).resizable().frame(width: 380, height: 380).padding(20).background(.white)
-            } else if failed {
+            } else if model.failed {
                 Image(systemName: "exclamationmark.circle").font(.system(size: 80)).foregroundStyle(.secondary).frame(width: 420, height: 420)
             } else { ProgressView().frame(width: 420, height: 420) }
-            Text(message).font(.title3).foregroundStyle(.secondary)
-            Button("重新生成") { attempt += 1 }
+            Text(model.message).font(.title3).foregroundStyle(.secondary)
+            Button("重新生成") { model.retry(onSuccess: onSuccess) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(white: 0.08))
-        .task(id: attempt) { await login() }
-    }
-
-    @MainActor
-    private func login() async {
-        image = nil
-        failed = false
-        message = "正在生成二维码…"
-        var stage = "生成二维码"
-        do {
-            guard let client = SignedClient.shared else { throw FeedError.invalidResponse }
-            let challenge = try await client.beginLogin()
-            let filter = CIFilter.qrCodeGenerator()
-            filter.message = Data(challenge.url.absoluteString.utf8)
-            filter.correctionLevel = "M"
-            guard let output = filter.outputImage, let cg = CIContext().createCGImage(output, from: output.extent) else { throw FeedError.invalidResponse }
-            image = UIImage(cgImage: cg)
-            message = "请使用小红书 App 扫码并确认"
-            stage = "检查登录状态"
-            for _ in 0..<90 {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-                switch try await client.checkLogin(challenge) {
-                case .waiting: break
-                case .scanned: message = "已扫码，请在手机上确认登录"
-                case .authenticated: onSuccess(); return
-                }
-            }
-            message = "二维码已过期，请重新生成"
-        } catch is CancellationError {
-            return
-        } catch {
-            image = nil
-            failed = true
-            message = "\(stage)失败：\(error.localizedDescription)"
-        }
+        .onAppear { model.startIfNeeded(onSuccess: onSuccess) }
     }
 }
 
@@ -205,6 +368,16 @@ private struct NoteDetailView: View {
     @State private var error: String?
     @State private var selectedImage = 0
     @State private var player: AVPlayer?
+    @State private var comments: [NoteComment] = []
+    @State private var commentCursor = ""
+    @State private var commentsHaveMore = false
+    @State private var commentsLoading = false
+    @State private var commentsLoaded = false
+    @State private var commentsError: String?
+    @State private var liked: Bool?
+    @State private var collected: Bool?
+    @State private var interactionPending = false
+    @State private var interactionError: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -240,6 +413,21 @@ private struct NoteDetailView: View {
                     Text(detail?.author ?? note.author).font(.headline)
                     Text(detail?.title ?? note.title).font(.title3.bold())
                     Text(detail?.description ?? "").font(.body)
+                    if liked != nil || collected != nil {
+                        HStack {
+                            if let liked {
+                                Button { Task { await setLiked(!liked) } } label: {
+                                    Label(liked ? "已点赞" : "点赞", systemImage: liked ? "heart.fill" : "heart")
+                                }.disabled(interactionPending)
+                            }
+                            if let collected {
+                                Button { Task { await setCollected(!collected) } } label: {
+                                    Label(collected ? "已收藏" : "收藏", systemImage: collected ? "star.fill" : "star")
+                                }.disabled(interactionPending)
+                            }
+                        }
+                    }
+                    if let interactionError { Text(interactionError).font(.callout).foregroundStyle(.secondary) }
                     if let url = detail?.video, player == nil {
                         Button("播放视频") { player = AVPlayer(url: url) }
                     }
@@ -248,6 +436,33 @@ private struct NoteDetailView: View {
                 .padding(32)
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 24))
                 .padding(28)
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(detail?.commentCount.isEmpty == false ? "评论 \(detail?.commentCount ?? "")" : "评论").font(.title3.bold())
+                    if let commentsError {
+                        Text(commentsError).font(.callout).foregroundStyle(.secondary)
+                        Button("重试") { Task { await loadComments() } }
+                    } else if commentsLoaded && comments.isEmpty {
+                        Text("暂无评论").font(.callout).foregroundStyle(.secondary)
+                    }
+                    ForEach(comments) { comment in
+                        HStack(alignment: .top, spacing: 14) {
+                            AsyncImage(url: comment.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
+                                .frame(width: 46, height: 46).clipShape(Circle())
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(comment.author).font(.callout).foregroundStyle(.secondary)
+                                Text(comment.content).font(.body)
+                                if !comment.likes.isEmpty { Label(comment.likes, systemImage: "heart").font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(20)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+                    }
+                    if commentsLoading { ProgressView() }
+                    if commentsHaveMore && !commentsLoading && commentsError == nil {
+                        Button("加载更多") { Task { await loadComments() } }
+                    }
+                }.padding(.horizontal, 28).padding(.bottom, 50)
             }
             .frame(width: 600)
             .background(Color(white: 0.12))
@@ -256,11 +471,61 @@ private struct NoteDetailView: View {
         .onExitCommand { dismiss() }
         .task {
             do {
-                let result = try await FeedService().detail(for: note)
+                let result: NoteDetail
+                if let client = SignedClient.shared, await client.isLoggedIn {
+                    result = try await client.noteDetail(for: note)
+                } else {
+                    result = try await FeedService().detail(for: note)
+                }
                 detail = result
+                liked = result.liked
+                collected = result.collected
                 if let video = result.video { player = AVPlayer(url: video) }
             } catch { self.error = error.localizedDescription }
         }
+        .task { await loadComments() }
+    }
+
+    @MainActor
+    private func setLiked(_ value: Bool) async {
+        guard !interactionPending, let client = SignedClient.shared else { return }
+        interactionPending = true
+        interactionError = nil
+        defer { interactionPending = false }
+        do { try await client.setLiked(value, noteID: note.id); liked = value }
+        catch { interactionError = "点赞操作失败，请重试" }
+    }
+
+    @MainActor
+    private func setCollected(_ value: Bool) async {
+        guard !interactionPending, let client = SignedClient.shared else { return }
+        interactionPending = true
+        interactionError = nil
+        defer { interactionPending = false }
+        do { try await client.setCollected(value, noteID: note.id); collected = value }
+        catch { interactionError = "收藏操作失败，请重试" }
+    }
+
+    @MainActor
+    private func loadComments() async {
+        guard !commentsLoading else { return }
+        guard let client = SignedClient.shared, await client.isLoggedIn else {
+            commentsError = "登录后可查看评论"
+            return
+        }
+        commentsLoading = true
+        commentsError = nil
+        defer { commentsLoading = false }
+        do {
+            let page = try await client.comments(for: note, cursor: commentCursor)
+            let existingIDs = Set(comments.map(\.id))
+            comments.append(contentsOf: page.comments.filter { !existingIDs.contains($0.id) })
+            commentsHaveMore = page.hasMore && !page.cursor.isEmpty && page.cursor != commentCursor
+            commentCursor = page.cursor
+            commentsLoaded = true
+        } catch is CancellationError {
+            return
+        } catch { commentsError = "暂时无法加载评论" }
     }
 }
 

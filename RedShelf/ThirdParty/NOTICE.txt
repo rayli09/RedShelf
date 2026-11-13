@@ -1,0 +1,12 @@
+RedShelf contains open-source components:
+
+- xhshow-ts 1.2.0, MIT; xhshow-ts-LICENSE.txt
+  https://github.com/ikenxuan/xhshow-ts
+- @jspm/core 2.1.0 and bundled browser shims; jspm-core-LICENSE.txt
+  https://github.com/jspm/jspm-core
+- xiaohongshu-cli xhssign, Apache-2.0; xiaohongshu-cli-LICENSE.txt
+  https://github.com/tamnd/xiaohongshu-cli
+- Go mobile bindings, BSD-3-Clause; gomobile-LICENSE.txt
+  https://github.com/netbirdio/gomobile-tvos-fork
+
+These packages are unofficial and are not affiliated with Xiaohongshu.

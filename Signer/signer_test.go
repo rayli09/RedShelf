@@ -36,3 +36,16 @@ func TestRejectsMissingSession(t *testing.T) {
 		t.Fatal("expected missing session error")
 	}
 }
+
+func TestQueryURIEscapesSensitiveValuesAndSignsSameURI(t *testing.T) {
+	uri, err := QueryURI("/api/test", `{"token":"a+b/c= d","cursor":""}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uri != "/api/test?cursor=&token=a%2Bb%2Fc%3D+d" {
+		t.Fatalf("unexpected URI: %s", uri)
+	}
+	if _, err := Headers("GET", uri, "", `{"a1":"test","webId":"test"}`); err != nil {
+		t.Fatal(err)
+	}
+}
