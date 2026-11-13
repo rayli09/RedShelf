@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 struct FeedNote: Identifiable, Equatable {
     let id: String
@@ -43,6 +44,66 @@ struct SearchPage {
     let hasMore: Bool
 }
 
+struct SearchUser: Identifiable {
+    let id: String
+    let name: String
+    let redID: String
+    let avatar: URL?
+    let token: String
+}
+
+struct UserSearchPage {
+    let users: [SearchUser]
+    let hasMore: Bool
+}
+
+struct RecommendationPage {
+    let notes: [FeedNote]
+    let cursor: String
+}
+
+struct UserProfile {
+    let id: String
+    let name: String
+    let redID: String
+    let avatar: URL?
+    let biography: String
+    let following: String?
+    let followers: String?
+    let likes: String?
+
+    init(id: String, name: String, redID: String, avatar: URL? = nil, biography: String = "",
+         following: String? = nil, followers: String? = nil, likes: String? = nil) {
+        self.id = id; self.name = name; self.redID = redID; self.avatar = avatar; self.biography = biography
+        self.following = following; self.followers = followers; self.likes = likes
+    }
+}
+
+struct UserNotePage {
+    let notes: [FeedNote]
+    let cursor: String
+    let hasMore: Bool
+}
+
+struct LiveRoom: Identifiable {
+    let id: String
+    let title: String
+    let host: String
+    let cover: URL?
+    let viewers: String
+}
+
+enum UserNoteCollection: String, CaseIterable {
+    case posted = "我的笔记", liked = "我的点赞", collected = "我的收藏"
+    var path: String {
+        switch self {
+        case .posted: return "/api/sns/web/v1/user_posted"
+        case .liked: return "/api/sns/web/v1/note/like/page"
+        case .collected: return "/api/sns/web/v2/note/collect/page"
+        }
+    }
+}
+
 enum QRLoginStatus: Equatable {
     case waiting, scanned, confirmed, expired
 
@@ -60,11 +121,13 @@ enum QRLoginStatus: Equatable {
 enum FeedError: LocalizedError {
     case unavailable
     case invalidResponse
+    case liveUnavailable
 
     var errorDescription: String? {
         switch self {
         case .unavailable: return "小红书暂未返回推荐内容，可能需要登录。"
         case .invalidResponse: return "无法读取推荐内容，请稍后重试。"
+        case .liveUnavailable: return "直播已结束、受限或没有可播放的 HLS 视频。"
         }
     }
 }
@@ -126,7 +189,11 @@ enum FeedParser {
         let streams = media?["stream"] as? [String: Any]
         let h264 = streams?["h264"] as? [[String: Any]] ?? []
         let h265 = streams?["h265"] as? [[String: Any]] ?? []
-        let videoURL = ((h264.first ?? h265.first)?["master_url"] as? String).flatMap(URL.init(string:))
+        let videoURL = (h264 + h265).compactMap { stream -> URL? in
+            guard let value = stream["master_url"] as? String, let url = URL(string: value),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
+            return url
+        }.first
         let interactions = note["interact_info"] as? [String: Any] ?? [:]
         return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
                           author: user["nickname"] as? String ?? "", images: images, video: videoURL,
@@ -137,8 +204,9 @@ enum FeedParser {
     static func parseHomeFeed(_ result: [String: Any], source: String = "pc_feed") throws -> [FeedNote] {
         guard let items = result["items"] as? [[String: Any]] else { throw FeedError.invalidResponse }
         return items.compactMap { item in
-            guard let card = item["note_card"] as? [String: Any],
-                  let id = (item["id"] as? String) ?? (card["note_id"] as? String), !id.isEmpty else { return nil }
+            guard let card = item["note_card"] as? [String: Any] else { return nil }
+            let id = [item["id"] as? String, card["note_id"] as? String].compactMap { $0 }.first { !$0.isEmpty }
+            guard let id else { return nil }
             let user = card["user"] as? [String: Any] ?? [:]
             let cover = card["cover"] as? [String: Any] ?? [:]
             let interaction = card["interact_info"] as? [String: Any] ?? [:]
@@ -153,6 +221,101 @@ enum FeedParser {
                             isVideo: card["type"] as? String == "video",
                             accessToken: (item["xsec_token"] as? String) ?? (card["xsec_token"] as? String) ?? "", source: source)
         }
+    }
+
+    static func parseUserProfile(_ value: [String: Any]) throws -> UserProfile {
+        guard value["guest"] as? Bool != true, let id = value["user_id"] as? String, !id.isEmpty else { throw FeedError.unavailable }
+        let image = (value["images"] as? String) ?? (value["imageb"] as? String)
+        return UserProfile(id: id, name: value["nickname"] as? String ?? "小红书用户", redID: value["red_id"] as? String ?? "",
+                           avatar: image.flatMap(URL.init(string:)), biography: value["desc"] as? String ?? "")
+    }
+
+    static func parseProfileDetails(_ value: [String: Any], base: UserProfile) throws -> UserProfile {
+        guard let basic = value["basic_info"] as? [String: Any] else { throw FeedError.invalidResponse }
+        if let id = basic["user_id"] as? String, !id.isEmpty, id != base.id { throw FeedError.invalidResponse }
+        let interactions = value["interactions"] as? [[String: Any]] ?? []
+        func count(_ type: String) -> String? {
+            guard let value = interactions.first(where: { $0["type"] as? String == type })?["count"] else { return nil }
+            let result = countString(value)
+            return result.isEmpty ? nil : result
+        }
+        let image = ((basic["imageb"] as? String) ?? (basic["images"] as? String)).flatMap(URL.init(string:))
+        return UserProfile(id: base.id, name: (basic["nickname"] as? String) ?? base.name,
+                           redID: (basic["red_id"] as? String) ?? base.redID, avatar: image ?? base.avatar,
+                           biography: (basic["desc"] as? String) ?? base.biography,
+                           following: count("follows"), followers: count("fans"), likes: count("interaction"))
+    }
+
+    static func parseUserSearch(_ value: [String: Any]) throws -> UserSearchPage {
+        guard let items = value["users"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        let users: [SearchUser] = items.compactMap { item in
+            guard let id = [item["id"] as? String, item["user_id"] as? String].compactMap({ $0 }).first(where: { !$0.isEmpty }) else { return nil }
+            return SearchUser(id: id, name: (item["name"] as? String) ?? (item["nickname"] as? String) ?? "小红书用户",
+                              redID: item["red_id"] as? String ?? "", avatar: ((item["image"] as? String) ?? (item["avatar"] as? String)).flatMap(URL.init(string:)),
+                              token: item["xsec_token"] as? String ?? "")
+        }
+        return UserSearchPage(users: users, hasMore: value["has_more"] as? Bool ?? false)
+    }
+
+    static func parseLiveList(_ value: [String: Any]) throws -> [LiveRoom] {
+        guard let feeds = value["feeds"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        return feeds.compactMap { item in
+            guard let live = item["live"] as? [String: Any], let room = live["t_room_info"] as? [String: Any] else { return nil }
+            let id = (room["room_id_str"] as? String) ?? (room["room_id"] as? NSNumber)?.stringValue ?? ""
+            guard !id.isEmpty, id.allSatisfy(\.isNumber) else { return nil }
+            let host = live["t_live_host_info"] as? [String: Any] ?? [:]
+            let coverInfo = room["cover_info"] as? [String: Any] ?? [:]
+            let cover = (room["cover"] as? String) ?? (coverInfo["cover_image"] as? String)
+            return LiveRoom(id: id, title: room["name"] as? String ?? "直播", host: host["nickname"] as? String ?? "",
+                            cover: cover.flatMap(URL.init(string:)), viewers: countString(room["display_count"] ?? room["member_count"]))
+        }
+    }
+
+    static func parseLiveStream(_ html: String, roomID: String) throws -> URL {
+        guard !roomID.isEmpty, roomID.allSatisfy(\.isNumber) else { throw FeedError.invalidResponse }
+        let root = try state(html)
+        func integer(_ value: Any?) -> Int? {
+            if let string = value as? String { return Int(string) }
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue == Double(number.intValue) else { return nil }
+            return number.intValue
+        }
+        guard let live = root["liveStream"] as? [String: Any], live["pageStatus"] as? String == "success",
+              live["liveStatus"] as? String == "success", let data = live["roomData"] as? [String: Any],
+              let room = data["roomInfo"] as? [String: Any], room["roomId"] as? String == roomID,
+              integer(room["status"]) == 2, integer(room["monetizeType"]) == 0 else { throw FeedError.liveUnavailable }
+        let limits: [Int]?
+        if let values = room["joinLimitTypes"] as? [Any] {
+            let parsed = values.compactMap { integer($0) }
+            limits = parsed.count == values.count ? parsed : nil
+        }
+        else if let string = room["joinLimitTypes"] as? String, let data = string.data(using: .utf8) { limits = try? JSONDecoder().decode([Int].self, from: data) }
+        else { limits = nil }
+        guard let limits, limits.allSatisfy({ $0 == 0 }) else { throw FeedError.liveUnavailable }
+        let config: [String: Any]?
+        if let object = room["pullConfig"] as? [String: Any] { config = object }
+        else if let string = room["pullConfig"] as? String, let data = string.data(using: .utf8) { config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] }
+        else { config = nil }
+        for codec in ["h264", "h265"] {
+            for stream in config?[codec] as? [[String: Any]] ?? [] {
+                guard let raw = stream["master_url"] as? String, let url = URL(string: raw),
+                      let host = url.host?.lowercased(), host.hasSuffix(".xhscdn.com"),
+                      url.scheme?.lowercased() == "https", url.user == nil, url.password == nil, url.fragment == nil,
+                      url.port == nil || url.port == 443, url.path == "/live/\(roomID).m3u8" else { continue }
+                return url
+            }
+        }
+        throw FeedError.liveUnavailable
+    }
+
+    static func parseUserNotes(_ value: [String: Any]) throws -> UserNotePage {
+        guard let notes = value["notes"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        let items: [[String: Any]] = notes.map { note in
+            if note["note_card"] != nil { return note }
+            return ["id": (note["note_id"] as? String) ?? (note["id"] as? String) ?? "", "note_card": note]
+        }
+        return UserNotePage(notes: try parseHomeFeed(["items": items], source: "pc_user"),
+                            cursor: value["cursor"] as? String ?? "", hasMore: value["has_more"] as? Bool ?? false)
     }
 
     static func parse(_ html: String) throws -> [FeedNote] {

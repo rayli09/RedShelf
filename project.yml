@@ -35,11 +35,23 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.rayli.redshelf.tests
+  RedShelfUITests:
+    type: bundle.ui-testing
+    platform: tvOS
+    sources: [RedShelfUITests]
+    dependencies:
+      - target: RedShelf
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.rayli.redshelf.uitests
+        TEST_TARGET_NAME: RedShelf
 schemes:
   RedShelf:
     build:
       targets:
         RedShelf: all
         RedShelfTests: [test]
+        RedShelfUITests: [test]
     test:
-      targets: [RedShelfTests]
+      targets: [RedShelfTests, RedShelfUITests]
