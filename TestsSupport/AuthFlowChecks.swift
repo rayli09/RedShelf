@@ -699,6 +699,7 @@ private struct AuthFlowChecks {
                               #"{"success":true,"data":{"codeStatus":1}}"#,
                               #"{"success":true,"data":{"codeStatus":2,"userId":"user-a"}}"#][min(polls, 2)])
             case "/api/sns/web/v1/login/qrcode/status":
+                try expect(request.value(forHTTPHeaderField: "x-login-mode") == "", "domestic QR completion lacks login mode header")
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
                 try expect(query.contains { $0.name == "qr_id" && $0.value == "id" }, "wrong completion parameter")
                 guard let encoded = query.first(where: { $0.name == "client_public_key_base64" })?.value,

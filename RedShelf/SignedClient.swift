@@ -481,7 +481,7 @@ actor SignedClient {
                             headers[header] = value
                         }
                     }
-                }
+                } else { headers["x-login-mode"] = "" }
                 do { completion = try await call(method: "GET", uri: uri, body: "", extraHeaders: headers) }
                 catch is CancellationError { throw CancellationError() }
                 catch let error as LoginRequestError {
