@@ -922,9 +922,20 @@ private final class SearchModel: ObservableObject {
 
     func search(keyword: String, filter: SearchFilter) {
         let query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
         searchTask?.cancel()
+        searchTask = nil
         generation += 1
+        guard !query.isEmpty else {
+            notes = []
+            users = []
+            loading = false
+            error = nil
+            searched = false
+            hasMore = false
+            page = 0
+            searchID = ""
+            return
+        }
         let current = generation
         activeKeyword = query
         activeFilter = filter
