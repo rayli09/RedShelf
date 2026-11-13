@@ -1,0 +1,38 @@
+name: RedShelf
+options:
+  bundleIdPrefix: com.rayli
+  deploymentTarget:
+    tvOS: '16.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    CODE_SIGN_STYLE: Automatic
+targets:
+  RedShelf:
+    type: application
+    platform: tvOS
+    sources: [RedShelf]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rayli.redshelf
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: RedShelf
+        TARGETED_DEVICE_FAMILY: '3'
+  RedShelfTests:
+    type: bundle.unit-test
+    platform: tvOS
+    sources: [RedShelfTests]
+    dependencies:
+      - target: RedShelf
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.rayli.redshelf.tests
+schemes:
+  RedShelf:
+    build:
+      targets:
+        RedShelf: all
+        RedShelfTests: [test]
+    test:
+      targets: [RedShelfTests]
