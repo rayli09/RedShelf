@@ -378,6 +378,10 @@ final class RedShelfUITests: XCTestCase {
         if !room.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(room.hasFocus)
         XCUIRemote.shared.press(.select)
-        XCTAssertTrue(app.staticTexts["live.fixture.playing"].waitForExistence(timeout: 15))
+        let playing = app.staticTexts["live.fixture.playing"]
+        XCTAssertTrue(playing.waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.menu)
+        XCTAssertTrue(playing.waitForNonExistence(timeout: 10), "Menu should close live playback")
+        XCTAssertTrue(room.waitForExistence(timeout: 10), "Live grid should reappear")
     }
 }
