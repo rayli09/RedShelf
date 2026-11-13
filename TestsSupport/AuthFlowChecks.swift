@@ -472,24 +472,28 @@ private struct AuthFlowChecks {
 
     private static func riskErrorIsActionableAndRedacted() async throws {
         var persisted = false
-        MockServer.handler = { request in
-            switch request.url?.path {
-            case "/api/qrcode/userinfo":
-                return (200, #"{"success":true,"data":{"codeStatus":2,"userId":"expected"}}"#)
-            case "/api/sns/web/v1/login/qrcode/status":
-                return (200, #"{"success":false,"code":300012,"msg":"IP at risk. private-server-detail"}"#)
-            default: throw TestFailure.unexpectedRequest
+        for code in [300011, 300012, 300013, 300015, 461, 471] {
+            for isHTTP in (code == 461 || code == 471 ? [false, true] : [false]) {
+                MockServer.handler = { request in
+                    switch request.url?.path {
+                    case "/api/qrcode/userinfo":
+                        return (200, #"{"success":true,"data":{"codeStatus":2,"userId":"expected"}}"#)
+                    case "/api/sns/web/v1/login/qrcode/status":
+                        return (isHTTP ? code : 200, "{\"success\":false,\"code\":\(code),\"msg\":\"private-server-detail\"}")
+                    default: throw TestFailure.unexpectedRequest
+                    }
+                }
+                let client = try makeClient { _ in persisted = true }
+                do {
+                    _ = try await client.checkLogin(LoginChallenge(id: "id", code: "code", url: URL(string: "xhsdiscover://login")!))
+                    throw TestFailure.failed("risk response accepted")
+                } catch is TestFailure { throw TestFailure.failed("risk response accepted") }
+                catch {
+                    let message = error.localizedDescription
+                    try expect(message.contains("安全限制") && message.contains("\(code)"), "risk was not surfaced")
+                    try expect(!message.contains("private-server-detail"), "raw server message leaked")
+                }
             }
-        }
-        let client = try makeClient { _ in persisted = true }
-        do {
-            _ = try await client.checkLogin(LoginChallenge(id: "id", code: "code", url: URL(string: "xhsdiscover://login")!))
-            throw TestFailure.failed("risk response accepted")
-        } catch is TestFailure { throw TestFailure.failed("risk response accepted") }
-        catch {
-            let message = error.localizedDescription
-            try expect(message.contains("安全限制") && message.contains("300012"), "risk was not surfaced")
-            try expect(!message.contains("private-server-detail"), "raw server message leaked")
         }
         try expect(!persisted, "risk failure saved a session")
     }

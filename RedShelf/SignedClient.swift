@@ -597,6 +597,7 @@ actor SignedClient {
         guard let response = response as? HTTPURLResponse else { throw LoginRequestError.malformed }
         guard (200..<300).contains(response.statusCode) else {
             log("event=http_error status=\(response.statusCode) endpoint=\(url.path)")
+            if [461, 471].contains(response.statusCode) { throw LoginRequestError.risk(response.statusCode) }
             throw LoginRequestError.http(response.statusCode)
         }
         guard let envelope = try? JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
@@ -607,7 +608,9 @@ actor SignedClient {
             let code = envelope["code"] as? Int ?? -1
             let category = errorCategory((envelope["msg"] as? String) ?? (envelope["message"] as? String) ?? "")
             log("event=api_error endpoint=\(url.path) code=\(code) category=\(category)")
-            if category == "risk" { throw LoginRequestError.risk(code) }
+            if [300011, 300012, 300013, 300015, 461, 471].contains(code) || category == "risk" {
+                throw LoginRequestError.risk(code)
+            }
             throw LoginRequestError.api(code)
         }
         let data: [String: Any]
