@@ -13,6 +13,12 @@ struct FeedNote: Identifiable, Equatable {
     let source: String
 }
 
+enum PaginationPrefetch {
+    static func shouldLoad(index: Int, count: Int, lookahead: Int) -> Bool {
+        count > 0 && index >= 0 && index < count && index >= max(0, count - max(1, lookahead))
+    }
+}
+
 struct NoteDetail {
     let title: String
     let description: String
@@ -23,6 +29,7 @@ struct NoteDetail {
     let collected: Bool?
     let likeCount: String
     let commentCount: String
+    var createdAt: Date? = nil
 }
 
 struct NoteComment: Identifiable, Equatable {
@@ -134,6 +141,7 @@ enum FeedError: LocalizedError {
     case invalidResponse
     case liveUnavailable
     case noteUnavailable
+    case sessionExpired
 
     var errorDescription: String? {
         switch self {
@@ -141,6 +149,7 @@ enum FeedError: LocalizedError {
         case .invalidResponse: return "无法读取推荐内容，请稍后重试。"
         case .liveUnavailable: return "暂时无法获取直播；可能已结束、受限或没有可播放的 HLS 视频。"
         case .noteUnavailable: return "无法获取该笔记，可能已删除、不可见或需要重新登录。"
+        case .sessionExpired: return "登录已过期，请重新扫码登录。"
         }
     }
 }
@@ -182,7 +191,7 @@ enum FeedParser {
             let user = comment["user_info"] as? [String: Any] ?? [:]
             let count = comment["like_count"]
             return NoteComment(id: id, author: user["nickname"] as? String ?? "",
-                               avatar: (user["image"] as? String).flatMap(URL.init(string:)),
+                               avatar: secureImageURL(user["image"] as? String),
                                content: comment["content"] as? String ?? "",
                                likes: (count as? String) ?? (count as? NSNumber)?.stringValue ?? "",
                                replyCount: countString(comment["sub_comment_count"]))
@@ -208,7 +217,8 @@ enum FeedParser {
         return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
                           author: user["nickname"] as? String ?? "", images: images, video: videoURL,
                           liked: interactions["liked"] as? Bool, collected: interactions["collected"] as? Bool,
-                          likeCount: countString(interactions["liked_count"]), commentCount: countString(interactions["comment_count"]))
+                          likeCount: countString(interactions["liked_count"]), commentCount: countString(interactions["comment_count"]),
+                          createdAt: creationDate(note["time"]))
     }
 
     static func parseHomeFeed(_ result: [String: Any], source: String = "pc_feed") throws -> [FeedNote] {
@@ -228,7 +238,7 @@ enum FeedParser {
                             title: title,
                             author: user["nickname"] as? String ?? "",
                             cover: imageURL(cover),
-                            avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
+                            avatar: secureImageURL(user["avatar"] as? String),
                             likes: likes,
                             isVideo: card["type"] as? String == "video",
                             accessToken: token, source: source)
@@ -243,19 +253,39 @@ enum FeedParser {
         return url
     }
 
+    private static func creationDate(_ value: Any?) -> Date? {
+        let raw: Double
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() { raw = number.doubleValue }
+        else if let string = value as? String, let number = Double(string) { raw = number }
+        else { return nil }
+        guard raw.isFinite, raw > 0 else { return nil }
+        let seconds = raw >= 100_000_000_000_000 ? raw / 1_000_000 : raw >= 100_000_000_000 ? raw / 1_000 : raw
+        guard seconds < 4_102_444_800 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func secureImageURL(_ value: String?) -> URL? {
+        guard let url = usableMediaURL(value), var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let host = parts.host?.lowercased() ?? ""
+        if parts.scheme?.lowercased() == "http", ["xhscdn.com", "rednotecdn.com"].contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
+            parts.scheme = "https"
+        }
+        return parts.url
+    }
+
     private static func imageURL(_ image: [String: Any]) -> URL? {
         let list = image["info_list"] as? [[String: Any]] ?? []
         let preferred = list.filter { $0["image_scene"] as? String == "WB_DFT" }
         let candidates = (preferred + list).compactMap { $0["url"] as? String } +
             [image["url_default"] as? String, image["url"] as? String].compactMap { $0 }
-        return candidates.compactMap { usableMediaURL($0) }.first
+        return candidates.compactMap { secureImageURL($0) }.first
     }
 
     static func parseUserProfile(_ value: [String: Any]) throws -> UserProfile {
         guard value["guest"] as? Bool != true, let id = value["user_id"] as? String, !id.isEmpty else { throw FeedError.unavailable }
         let image = (value["images"] as? String) ?? (value["imageb"] as? String)
         return UserProfile(id: id, name: value["nickname"] as? String ?? "小红书用户", redID: value["red_id"] as? String ?? "",
-                           avatar: image.flatMap(URL.init(string:)), biography: value["desc"] as? String ?? "")
+                           avatar: secureImageURL(image), biography: value["desc"] as? String ?? "")
     }
 
     static func parseProfileDetails(_ value: [String: Any], base: UserProfile) throws -> UserProfile {
@@ -267,7 +297,7 @@ enum FeedParser {
             let result = countString(value)
             return result.isEmpty ? nil : result
         }
-        let image = ((basic["imageb"] as? String) ?? (basic["images"] as? String)).flatMap(URL.init(string:))
+        let image = secureImageURL((basic["imageb"] as? String) ?? (basic["images"] as? String))
         return UserProfile(id: base.id, name: (basic["nickname"] as? String) ?? base.name,
                            redID: (basic["red_id"] as? String) ?? base.redID, avatar: image ?? base.avatar,
                            biography: (basic["desc"] as? String) ?? base.biography,
@@ -279,7 +309,7 @@ enum FeedParser {
         let users: [SearchUser] = items.compactMap { item in
             guard let id = [item["id"] as? String, item["user_id"] as? String].compactMap({ $0 }).first(where: { !$0.isEmpty }) else { return nil }
             return SearchUser(id: id, name: (item["name"] as? String) ?? (item["nickname"] as? String) ?? "小红书用户",
-                              redID: item["red_id"] as? String ?? "", avatar: ((item["image"] as? String) ?? (item["avatar"] as? String)).flatMap(URL.init(string:)),
+                              redID: item["red_id"] as? String ?? "", avatar: secureImageURL((item["image"] as? String) ?? (item["avatar"] as? String)),
                               token: item["xsec_token"] as? String ?? "")
         }
         return UserSearchPage(users: users, hasMore: value["has_more"] as? Bool ?? false)
@@ -295,7 +325,7 @@ enum FeedParser {
             let coverInfo = room["cover_info"] as? [String: Any] ?? [:]
             let cover = (room["cover"] as? String) ?? (coverInfo["cover_image"] as? String)
             return LiveRoom(id: id, title: room["name"] as? String ?? "直播", host: host["nickname"] as? String ?? "",
-                            cover: cover.flatMap(URL.init(string:)), viewers: countString(room["display_count"] ?? room["member_count"]))
+                            cover: secureImageURL(cover), viewers: countString(room["display_count"] ?? room["member_count"]))
         }
     }
 
@@ -357,8 +387,8 @@ enum FeedParser {
             let interactions = card["interactInfo"] as? [String: Any] ?? [:]
             return FeedNote(id: id, title: card["displayTitle"] as? String ?? "无标题",
                             author: (user["nickname"] as? String) ?? (user["nickName"] as? String) ?? "",
-                            cover: ((cover["urlDefault"] as? String) ?? (cover["url"] as? String)).flatMap(URL.init(string:)),
-                            avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
+                            cover: secureImageURL((cover["urlDefault"] as? String) ?? (cover["url"] as? String)),
+                            avatar: secureImageURL(user["avatar"] as? String),
                             likes: interactions["likedCount"] as? String ?? "",
                             isVideo: card["type"] as? String == "video", accessToken: item["xsecToken"] as? String ?? "", source: "pc_feed")
         }
@@ -371,7 +401,7 @@ enum FeedParser {
               let entry = details[id] as? [String: Any], let note = entry["note"] as? [String: Any], !note.isEmpty else { throw FeedError.noteUnavailable }
         let user = note["user"] as? [String: Any] ?? [:]
         let images = (note["imageList"] as? [[String: Any]] ?? []).compactMap { image in
-            ((image["urlDefault"] as? String) ?? (image["url"] as? String)).flatMap(URL.init(string:))
+            secureImageURL((image["urlDefault"] as? String) ?? (image["url"] as? String))
         }
         let video = note["video"] as? [String: Any]
         let media = video?["media"] as? [String: Any]
@@ -382,7 +412,8 @@ enum FeedParser {
         return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
                           author: (user["nickname"] as? String) ?? (user["nickName"] as? String) ?? "", images: images, video: videoURL,
                           liked: interactions["liked"] as? Bool, collected: interactions["collected"] as? Bool,
-                          likeCount: countString(interactions["likedCount"]), commentCount: countString(interactions["commentCount"]))
+                          likeCount: countString(interactions["likedCount"]), commentCount: countString(interactions["commentCount"]),
+                          createdAt: creationDate(note["time"]))
     }
 
     private static func countString(_ value: Any?) -> String {

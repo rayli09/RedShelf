@@ -5,9 +5,30 @@ import Foundation
 
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     .appendingPathComponent("RedShelf/Assets.xcassets/App Icon & Top Shelf Image.brandassets")
+let artworkURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Artwork/pixel-top-shelf.png")
+guard let artwork = NSImage(contentsOf: artworkURL)?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { fatalError("Cannot load pixel artwork") }
 
-func rounded(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat, _ radius: CGFloat) -> CGPath {
-    CGPath(roundedRect: CGRect(x: x, y: y, width: width, height: height), cornerWidth: radius, cornerHeight: radius, transform: nil)
+func drawArtwork(_ context: CGContext, width: CGFloat, height: CGFloat) {
+    let scale = max(width / CGFloat(artwork.width), height / CGFloat(artwork.height))
+    let size = CGSize(width: CGFloat(artwork.width) * scale, height: CGFloat(artwork.height) * scale)
+    context.interpolationQuality = .none
+    context.draw(artwork, in: CGRect(x: (width - size.width) / 2, y: (height - size.height) / 2, width: size.width, height: size.height))
+}
+
+func pixelWordmark() -> CGImage {
+    guard let pixels = CGContext(data: nil, width: 144, height: 48, bitsPerComponent: 8,
+                                 bytesPerRow: 144 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { fatalError("Cannot allocate wordmark") }
+    pixels.setAllowsAntialiasing(false)
+    let font = CTFontCreateWithName("PingFangSC-Semibold" as CFString, 42, nil)
+    let attrs = [kCTFontAttributeName: font, kCTForegroundColorAttributeName: NSColor.white.cgColor] as CFDictionary
+    let text = CFAttributedStringCreate(nil, "小红书" as CFString, attrs)!
+    let line = CTLineCreateWithAttributedString(text)
+    let textWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    pixels.textPosition = CGPoint(x: (144 - textWidth) / 2, y: 6)
+    CTLineDraw(line, pixels)
+    guard let wordmark = pixels.makeImage() else { fatalError("Cannot render wordmark") }
+    return wordmark
 }
 
 func makeTopShelf(_ scale: Int, _ output: URL) throws {
@@ -16,24 +37,9 @@ func makeTopShelf(_ scale: Int, _ output: URL) throws {
                                   bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { fatalError("Cannot allocate image") }
     context.scaleBy(x: CGFloat(scale), y: CGFloat(scale))
-    let colors = [NSColor(srgbRed: 0.20, green: 0.018, blue: 0.045, alpha: 1).cgColor,
-                  NSColor(srgbRed: 0.70, green: 0.06, blue: 0.15, alpha: 1).cgColor] as CFArray
-    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
-    context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 1920, y: 720), options: [])
-    let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, 142, nil)
-    let attributes = [kCTFontAttributeName: font, kCTForegroundColorAttributeName: NSColor.white.cgColor] as CFDictionary
-    let text = CFAttributedStringCreate(nil, "RedShelf" as CFString, attributes)!
-    context.textPosition = CGPoint(x: 250, y: 300)
-    CTLineDraw(CTLineCreateWithAttributedString(text), context)
-    context.setShadow(offset: CGSize(width: 0, height: -10), blur: 32, color: NSColor.black.withAlphaComponent(0.25).cgColor)
-    for (x, y, alpha) in [(1120.0, 155.0, 0.35), (1230.0, 175.0, 0.65), (1340.0, 195.0, 1.0)] {
-        context.setFillColor(NSColor.white.withAlphaComponent(alpha).cgColor)
-        context.addPath(rounded(x, y, 220, 330, 34)); context.fillPath()
-    }
-    context.setShadow(offset: .zero, blur: 0)
-    context.setFillColor(NSColor(srgbRed: 0.84, green: 0.12, blue: 0.23, alpha: 1).cgColor)
-    context.move(to: CGPoint(x: 1425, y: 300)); context.addLine(to: CGPoint(x: 1425, y: 410))
-    context.addLine(to: CGPoint(x: 1500, y: 355)); context.closePath(); context.fillPath()
+    drawArtwork(context, width: 1920, height: 720)
+    context.interpolationQuality = .none
+    context.draw(pixelWordmark(), in: CGRect(x: 90, y: 242, width: 600, height: 200))
     guard let image = context.makeImage(), let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { fatalError("Cannot encode image") }
     try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
     try png.write(to: output)
@@ -45,21 +51,10 @@ func makeLayer(_ name: String, _ width: Int, _ height: Int, _ output: URL) throw
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { fatalError("Cannot allocate image") }
     context.scaleBy(x: CGFloat(width) / 800, y: CGFloat(height) / 480)
     if name == "Back" {
-        let colors = [NSColor(srgbRed: 0.31, green: 0.025, blue: 0.075, alpha: 1).cgColor,
-                      NSColor(srgbRed: 0.77, green: 0.08, blue: 0.18, alpha: 1).cgColor] as CFArray
-        let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
-        context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 800, y: 480), options: [])
+        drawArtwork(context, width: 800, height: 480)
     } else {
-        context.setShadow(offset: CGSize(width: 0, height: -8), blur: 24, color: NSColor.black.withAlphaComponent(0.25).cgColor)
-        context.setFillColor(NSColor.white.withAlphaComponent(0.38).cgColor)
-        context.addPath(rounded(252, 112, 160, 240, 25)); context.fillPath()
-        context.setFillColor(NSColor.white.withAlphaComponent(0.66).cgColor)
-        context.addPath(rounded(334, 125, 160, 240, 25)); context.fillPath()
-        context.setFillColor(NSColor.white.cgColor)
-        context.addPath(rounded(414, 138, 160, 240, 25)); context.fillPath()
-        context.setShadow(offset: .zero, blur: 0)
-        context.setFillColor(NSColor(srgbRed: 0.84, green: 0.12, blue: 0.23, alpha: 1).cgColor)
-        context.move(to: CGPoint(x: 475, y: 216)); context.addLine(to: CGPoint(x: 475, y: 300)); context.addLine(to: CGPoint(x: 533, y: 258)); context.closePath(); context.fillPath()
+        context.interpolationQuality = .none
+        context.draw(pixelWordmark(), in: CGRect(x: 18, y: 180, width: 360, height: 120))
     }
     guard let image = context.makeImage() else { fatalError("Cannot render image") }
     let bitmap = NSBitmapImageRep(cgImage: image)

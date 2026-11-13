@@ -139,6 +139,9 @@ private struct AuthFlowChecks {
         try await signOutInvalidatesInFlightResponse()
         try await switchInvalidatesOldAccountResponse()
         try await switchesBetweenIsolatedAccounts()
+        try await detailCacheRespectsAccountAndInteractions()
+        try await detailPrefetchCannotCrossAccountSwitch()
+        try await expiredSessionStopsRequestsAndPreservesAccounts()
         try await refreshedCookiesSurviveAccountSwitchAndRestart()
         try await profileIdentityAndNameAreSafe()
         try await expiredCodeMustNotPersist()
@@ -175,6 +178,100 @@ private struct AuthFlowChecks {
         _ = try await client.homeFeed()
         let restored = try SignedClient(session: session(), initialVault: saved, saveVault: { _ in }, signerScriptURL: script)
         _ = try await restored.homeFeed()
+    }
+
+    private static func detailCacheRespectsAccountAndInteractions() async throws {
+        var vault = try testVault(StoredSession(cookies: ["a1": "a", "webId": "a", "web_session": "a"], sessionKey: nil))
+        try vault.save(SavedAccount(id: "other", name: "Other", session: StoredSession(cookies: ["a1": "b", "webId": "b", "web_session": "b"], sessionKey: nil)))
+        _ = try vault.activate(id: "test-user")
+        var detailRequests = 0
+        var commentRequests = 0
+        MockServer.handler = { request in
+            switch request.url?.path {
+            case "/api/sns/web/v1/feed":
+                detailRequests += 1
+                return (200, #"{"success":true,"data":{"items":[{"note_card":{"title":"Test"}}]}}"#)
+            case "/api/sns/web/v1/note/like": return (200, #"{"success":true,"data":null}"#)
+            case "/api/sns/web/v2/comment/page":
+                commentRequests += 1
+                return (200, #"{"success":true,"data":{"comments":[],"cursor":"","has_more":false}}"#)
+            default: throw TestFailure.unexpectedRequest
+            }
+        }
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Generated/WebSigner.js")
+        let client = try SignedClient(session: session(), initialVault: vault, saveVault: { _ in }, signerScriptURL: script)
+        let note = FeedNote(id: "note", title: "Test", author: "", cover: nil, avatar: nil, likes: "", isVideo: false, accessToken: "token", source: "pc_feed")
+        _ = try await client.noteDetail(for: note)
+        _ = try await client.noteDetail(for: note)
+        try expect(detailRequests == 1, "detail was not reused")
+        _ = try await client.comments(for: note)
+        _ = try await client.comments(for: note)
+        _ = try await client.comments(for: note, cursor: "next")
+        try expect(commentRequests == 2, "first-page comments were not reused or pagination was cached")
+        try await client.setLiked(true, noteID: note.id)
+        _ = try await client.noteDetail(for: note)
+        _ = try await client.comments(for: note)
+        try expect(detailRequests == 2, "interaction did not invalidate detail")
+        try expect(commentRequests == 3, "interaction did not invalidate comments")
+        try await client.switchAccount(id: "other")
+        _ = try await client.noteDetail(for: note)
+        _ = try await client.comments(for: note)
+        try expect(detailRequests == 3, "detail leaked across accounts")
+        try expect(commentRequests == 4, "comments leaked across accounts")
+    }
+
+    private static func detailPrefetchCannotCrossAccountSwitch() async throws {
+        var vault = try testVault(StoredSession(cookies: ["a1": "a", "webId": "a", "web_session": "a"], sessionKey: nil))
+        try vault.save(SavedAccount(id: "other", name: "Other", session: StoredSession(cookies: ["a1": "b", "webId": "b", "web_session": "b"], sessionKey: nil)))
+        _ = try vault.activate(id: "test-user")
+        let started = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var requests = 0
+        ConcurrentMockServer.handler = { request in
+            lock.lock(); requests += 1; let attempt = requests; lock.unlock()
+            let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+            if attempt == 1 {
+                try expect(cookie.contains("web_session=a"), "prefetch used the wrong account")
+                started.signal()
+                guard release.wait(timeout: .now() + 10) == .success else { throw TestFailure.failed("prefetch not released") }
+            } else {
+                try expect(cookie.contains("web_session=b"), "new account received old cache")
+            }
+            return (200, #"{"success":true,"data":{"items":[{"note_card":{"title":"Test"}}]}}"#)
+        }
+        defer { ConcurrentMockServer.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ConcurrentMockServer.self]
+        config.httpShouldSetCookies = false
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Generated/WebSigner.js")
+        let client = try SignedClient(session: URLSession(configuration: config), initialVault: vault, saveVault: { _ in }, signerScriptURL: script)
+        let note = FeedNote(id: "note", title: "Test", author: "", cover: nil, avatar: nil, likes: "", isVideo: false, accessToken: "token", source: "pc_feed")
+        let old = Task { try await client.noteDetail(for: note) }
+        let ready = await Task.detached { started.wait(timeout: .now() + 5) == .success }.value
+        guard ready else { release.signal(); throw TestFailure.failed("prefetch did not start") }
+        try await client.switchAccount(id: "other")
+        release.signal()
+        do { _ = try await old.value; throw TestFailure.failed("old account prefetch returned") }
+        catch is CancellationError { }
+        _ = try await client.noteDetail(for: note)
+        try expect(requests == 2, "new account did not fetch its own detail")
+    }
+
+    private static func expiredSessionStopsRequestsAndPreservesAccounts() async throws {
+        let stored = StoredSession(cookies: ["a1": "a", "webId": "a", "web_session": "a"], sessionKey: nil)
+        let vault = try testVault(stored)
+        var requests = 0
+        MockServer.handler = { _ in requests += 1; return (200, #"{"success":false,"code":-100}"#) }
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Generated/WebSigner.js")
+        let client = try SignedClient(session: session(), initialVault: vault, saveVault: { _ in throw TestFailure.failed("expired account was overwritten") }, signerScriptURL: script)
+        do { _ = try await client.homeFeed(); throw TestFailure.failed("expired session accepted") }
+        catch FeedError.sessionExpired { }
+        try expect(!(await client.isLoggedIn), "expired session remained active")
+        let accounts = await client.accounts
+        try expect(accounts.count == 1 && !accounts[0].isActive, "expired account was removed")
+        do { _ = try await client.homeFeed(); throw TestFailure.failed("expired session retried") }
+        catch FeedError.unavailable { }
+        try expect(requests == 1, "expired session sent another request")
     }
 
     private static func overseasGuestIsNeverSavedAsAccount() async throws {

@@ -10,10 +10,42 @@ final class RedShelfUITests: XCTestCase {
         app.launch()
     }
 
+    private func focusRecommendation() {
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.fixture-"))
+        for _ in 0..<3 where !cards.allElementsBoundByIndex.contains(where: { $0.hasFocus }) {
+            XCUIRemote.shared.press(.down)
+        }
+    }
+
+    private func openProfileFromSettings() {
+        let settings = app.buttons["设置"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.up)
+        for _ in 0..<6 where !settings.hasFocus { XCUIRemote.shared.press(.right) }
+        XCTAssertTrue(settings.hasFocus)
+        XCUIRemote.shared.press(.select)
+        let account = app.buttons["settings.account"]
+        XCTAssertTrue(account.waitForExistence(timeout: 10))
+        let accountRow = app.cells["我的账号"]
+        if !accountRow.hasFocus { XCUIRemote.shared.press(.down) }
+        for _ in 0..<4 where !accountRow.hasFocus { XCUIRemote.shared.press(.up) }
+        XCTAssertTrue(accountRow.hasFocus)
+        XCUIRemote.shared.press(.select)
+    }
+
+    private func openAccountSwitcher() {
+        let account = app.buttons["账号"]
+        XCTAssertTrue(account.waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.up)
+        for _ in 0..<8 where !account.hasFocus { XCUIRemote.shared.press(.right) }
+        XCTAssertTrue(account.hasFocus)
+        XCUIRemote.shared.press(.select)
+    }
+
     func testRecommendationGridOpensAndReturnsFromDetail() {
         let first = app.buttons["note.fixture-0"]
         XCTAssertTrue(first.waitForExistence(timeout: 15), "Recommendation grid did not appear")
-        XCUIRemote.shared.press(.down)
+        focusRecommendation()
         let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.fixture-"))
         XCTAssertTrue(cards.allElementsBoundByIndex.contains { $0.hasFocus }, "A recommendation should be reachable with the remote")
         XCUIRemote.shared.press(.select)
@@ -22,18 +54,64 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 10), "Returning should show the recommendation grid")
     }
 
-    func testRecommendationColumnsAdaptToTitleHeight() {
+    func testHomeRefreshIsReachableWithRemote() {
+        let refresh = app.buttons["feed.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.down)
+        for _ in 0..<3 where !refresh.hasFocus { XCUIRemote.shared.press(.up) }
+        XCTAssertTrue(refresh.hasFocus, "Refresh should be reachable with the remote")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 10))
+    }
+
+    func testFocusedCoverDoesNotOverlapCaption() throws {
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 15))
+        focusRecommendation()
+        let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.fixture-"))
+        let focused = try XCTUnwrap(cards.allElementsBoundByIndex.first { $0.hasFocus })
+        let index = try XCTUnwrap(Int(focused.identifier.replacingOccurrences(of: "note.fixture-", with: "")))
+        let title = app.staticTexts["测试笔记 \(index + 1)"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertLessThanOrEqual(focused.frame.maxY, title.frame.minY, "The focused cover must not cover its title")
+    }
+
+    func testDetailBackButtonReturnsToFeed() {
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 15))
+        focusRecommendation()
+        XCUIRemote.shared.press(.select)
+        let back = app.buttons["detail.back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 10))
+        for _ in 0..<4 where !back.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<4 where !back.hasFocus { XCUIRemote.shared.press(.up) }
+        XCTAssertTrue(back.hasFocus, "Back should be reachable with the remote")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 10))
+    }
+
+    func testLongDetailStartsExpanded() {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-long-description"]
+        app.launch()
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 15))
+        focusRecommendation()
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.buttons["收起"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["展开全文"].exists)
+    }
+
+    func testRecommendationRowsStayAlignedWithDifferentTitleHeights() {
         app.terminate()
         app.launchArguments = ["--ui-testing", "--ui-testing-masonry"]
         app.launch()
         let first = app.buttons["note.fixture-0"]
         let secondRowLong = app.buttons["note.fixture-4"]
-        let secondRowShort = app.buttons["note.fixture-6"]
+        let secondRowShort = app.buttons["note.fixture-5"]
         XCTAssertTrue(first.waitForExistence(timeout: 15))
+        focusRecommendation()
+        XCUIRemote.shared.press(.down)
         XCTAssertTrue(secondRowLong.waitForExistence(timeout: 10))
         XCTAssertTrue(secondRowShort.waitForExistence(timeout: 10))
-        XCTAssertGreaterThan(secondRowLong.frame.minY, secondRowShort.frame.minY + 10, "Columns should follow their own content height")
-        XCUIRemote.shared.press(.down)
+        XCTAssertEqual(secondRowLong.frame.minY, secondRowShort.frame.minY, accuracy: 2, "Covers in each row should align")
         let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "note.fixture-"))
         let before = cards.allElementsBoundByIndex.first { $0.hasFocus }?.identifier
         XCTAssertNotNil(before)
@@ -49,7 +127,7 @@ final class RedShelfUITests: XCTestCase {
         app.launch()
         let first = app.buttons["note.fixture-0"]
         XCTAssertTrue(first.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.down)
+        focusRecommendation()
         XCUIRemote.shared.press(.select)
         let image = app.descendants(matching: .any).matching(identifier: "detail.mainImage").firstMatch
         XCTAssertTrue(image.waitForExistence(timeout: 10))
@@ -57,23 +135,21 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(second.waitForExistence(timeout: 10))
         for _ in 0..<3 where !second.hasFocus { XCUIRemote.shared.press(.right) }
         XCTAssertTrue(second.hasFocus)
-        XCUIRemote.shared.press(.select)
         XCTAssertEqual(image.label, "图片 2/3")
         let showText = app.buttons["detail.showText"]
         XCTAssertTrue(showText.waitForExistence(timeout: 10))
-        for _ in 0..<3 where !showText.hasFocus { XCUIRemote.shared.press(.down) }
+        for _ in 0..<5 where !showText.hasFocus { XCUIRemote.shared.press(.right) }
         XCTAssertTrue(showText.hasFocus)
         XCUIRemote.shared.press(.select)
-        let comment = app.descendants(matching: .any).matching(identifier: "comment.fixture-comment").firstMatch
+        let comment = app.buttons["comment.fixture-comment"]
         XCTAssertTrue(comment.waitForExistence(timeout: 10))
         for _ in 0..<6 where !comment.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(comment.hasFocus, "Comments should be reachable using the remote")
-        let replies = app.buttons["comment.replies.fixture-comment"]
-        XCTAssertTrue(replies.waitForExistence(timeout: 10))
-        for _ in 0..<3 where !replies.hasFocus { XCUIRemote.shared.press(.down) }
-        XCTAssertTrue(replies.hasFocus, "Reply action should be reachable")
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["测试回复"].waitForExistence(timeout: 10))
+        let thumbnails = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "detail.image."))
+        XCUIRemote.shared.press(.left)
+        XCTAssertTrue(thumbnails.allElementsBoundByIndex.contains { $0.hasFocus }, "Left should return directly from comments to the thumbnails")
     }
 
     func testPlayingNoteVideoCanReachComments() {
@@ -81,7 +157,7 @@ final class RedShelfUITests: XCTestCase {
         app.launchArguments = ["--ui-testing", "--ui-testing-reset-settings", "--ui-testing-detail-video"]
         app.launch()
         XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.down)
+        focusRecommendation()
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["detail.video.playing"].waitForExistence(timeout: 10))
         let comment = app.descendants(matching: .any).matching(identifier: "comment.fixture-comment").firstMatch
@@ -145,13 +221,16 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(app.images["login.qr"].waitForExistence(timeout: 10))
     }
 
+    func testExpiredSessionReturnsToLoginWithExplanation() {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-expired-session"]
+        app.launch()
+        XCTAssertTrue(app.images["login.qr"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["登录已过期，请重新扫码登录。"].waitForExistence(timeout: 10))
+    }
+
     func testLocalSignOutReturnsToReusableLogin() {
-        let profileTab = app.buttons["我的"]
-        XCTAssertTrue(profileTab.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.up)
-        for _ in 0..<6 where !profileTab.hasFocus { XCUIRemote.shared.press(.right) }
-        XCTAssertTrue(profileTab.hasFocus)
-        XCUIRemote.shared.press(.select)
+        openProfileFromSettings()
         let signOut = app.buttons["profile.signout"]
         XCTAssertTrue(signOut.waitForExistence(timeout: 10))
         let actions = [app.buttons["我的笔记"], app.buttons["我的点赞"], app.buttons["我的收藏"], app.buttons["profile.accounts"], signOut]
@@ -222,12 +301,7 @@ final class RedShelfUITests: XCTestCase {
     }
 
     func testProfileChangesPersonalCollection() {
-        let profileTab = app.buttons["我的"]
-        XCTAssertTrue(profileTab.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.up)
-        for _ in 0..<6 where !profileTab.hasFocus { XCUIRemote.shared.press(.right) }
-        XCTAssertTrue(profileTab.hasFocus)
-        XCUIRemote.shared.press(.select)
+        openProfileFromSettings()
         XCTAssertTrue(app.staticTexts["测试我的笔记"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["测试简介"].exists)
         XCTAssertTrue(app.staticTexts["227"].exists)
@@ -243,60 +317,33 @@ final class RedShelfUITests: XCTestCase {
     }
 
     func testSwitchSavedAccount() {
-        let profileTab = app.buttons["我的"]
-        XCTAssertTrue(profileTab.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.up)
-        for _ in 0..<6 where !profileTab.hasFocus { XCUIRemote.shared.press(.right) }
-        XCTAssertTrue(profileTab.hasFocus)
-        XCUIRemote.shared.press(.select)
-        let accounts = app.buttons["profile.accounts"]
-        XCTAssertTrue(accounts.waitForExistence(timeout: 10))
-        let actions = [app.buttons["我的笔记"], app.buttons["我的点赞"], app.buttons["我的收藏"], accounts, app.buttons["profile.signout"]]
-        if !actions.contains(where: { $0.hasFocus }) { XCUIRemote.shared.press(.down) }
-        for _ in 0..<5 where !accounts.hasFocus { XCUIRemote.shared.press(.right) }
-        for _ in 0..<5 where !accounts.hasFocus { XCUIRemote.shared.press(.left) }
-        XCTAssertTrue(accounts.hasFocus)
-        XCUIRemote.shared.press(.select)
+        openAccountSwitcher()
         let second = app.buttons["account.fixture-b"]
         XCTAssertTrue(second.waitForExistence(timeout: 10))
         for _ in 0..<4 where !second.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(second.hasFocus)
         XCUIRemote.shared.press(.select)
-        XCTAssertTrue(app.staticTexts["已切换账号"].waitForExistence(timeout: 10))
+        let active = expectation(for: NSPredicate(format: "value == %@", "当前账号"), evaluatedWith: second)
+        wait(for: [active], timeout: 10)
+        XCTAssertTrue(app.buttons["account.add"].exists, "Account page should remain open after switching")
     }
 
     func testAddAccountCanReturnToSavedAccount() {
-        let profileTab = app.buttons["我的"]
-        XCTAssertTrue(profileTab.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.up)
-        for _ in 0..<6 where !profileTab.hasFocus { XCUIRemote.shared.press(.right) }
-        XCTAssertTrue(profileTab.hasFocus)
-        XCUIRemote.shared.press(.select)
-        let accounts = app.buttons["profile.accounts"]
-        XCTAssertTrue(accounts.waitForExistence(timeout: 10))
-        let actions = [app.buttons["我的笔记"], app.buttons["我的点赞"], app.buttons["我的收藏"], accounts, app.buttons["profile.signout"]]
-        if !actions.contains(where: { $0.hasFocus }) { XCUIRemote.shared.press(.down) }
-        for _ in 0..<5 where !accounts.hasFocus { XCUIRemote.shared.press(.right) }
-        for _ in 0..<5 where !accounts.hasFocus { XCUIRemote.shared.press(.left) }
-        XCTAssertTrue(accounts.hasFocus)
-        XCUIRemote.shared.press(.select)
+        openAccountSwitcher()
         let add = app.buttons["account.add"]
         XCTAssertTrue(add.waitForExistence(timeout: 10))
         for _ in 0..<5 where !add.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(add.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.images["login.qr"].waitForExistence(timeout: 10))
-        let saved = app.buttons["login.accounts"]
-        XCTAssertTrue(saved.waitForExistence(timeout: 10))
-        for _ in 0..<5 where !saved.hasFocus { XCUIRemote.shared.press(.down) }
-        XCTAssertTrue(saved.hasFocus)
-        XCUIRemote.shared.press(.select)
+        openAccountSwitcher()
         let first = app.buttons["account.fixture-a"]
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         for _ in 0..<5 where !first.hasFocus { XCUIRemote.shared.press(.up) }
         XCTAssertTrue(first.hasFocus)
         XCUIRemote.shared.press(.select)
-        XCTAssertTrue(app.staticTexts["已切换账号"].waitForExistence(timeout: 10))
+        let active = expectation(for: NSPredicate(format: "value == %@", "当前账号"), evaluatedWith: first)
+        wait(for: [active], timeout: 10)
     }
 
     func testPlaybackFailureShowsRetry() {
@@ -346,7 +393,7 @@ final class RedShelfUITests: XCTestCase {
         let toggle = app.descendants(matching: .any).matching(identifier: "settings.autoplay").firstMatch
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         let row = app.cells["自动播放笔记视频"]
-        if !row.hasFocus { XCUIRemote.shared.press(.down) }
+        for _ in 0..<4 where !row.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(row.hasFocus)
         XCUIRemote.shared.press(.select)
         app.terminate()
@@ -365,23 +412,10 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["video.fixture.playing"].waitForExistence(timeout: 10))
     }
 
-    func testLiveRoomOpensAndPlaysFixture() {
-        let tab = app.buttons["直播"]
-        XCTAssertTrue(tab.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.up)
-        for _ in 0..<6 where !tab.hasFocus { XCUIRemote.shared.press(.right) }
-        XCTAssertTrue(tab.hasFocus)
-        XCUIRemote.shared.press(.select)
-        let room = app.buttons["live.123"]
-        XCTAssertTrue(room.waitForExistence(timeout: 10))
-        if !room.hasFocus { XCUIRemote.shared.press(.down) }
-        if !room.hasFocus { XCUIRemote.shared.press(.down) }
-        XCTAssertTrue(room.hasFocus)
-        XCUIRemote.shared.press(.select)
-        let playing = app.staticTexts["live.fixture.playing"]
-        XCTAssertTrue(playing.waitForExistence(timeout: 15))
-        XCUIRemote.shared.press(.menu)
-        XCTAssertTrue(playing.waitForNonExistence(timeout: 10), "Menu should close live playback")
-        XCTAssertTrue(room.waitForExistence(timeout: 10), "Live grid should reappear")
+    func testTopNavigationOmitsLiveAndProfile() {
+        XCTAssertTrue(app.buttons["推荐"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["直播"].exists)
+        XCTAssertFalse(app.buttons["我的"].exists)
+        XCTAssertTrue(app.buttons["设置"].exists)
     }
 }

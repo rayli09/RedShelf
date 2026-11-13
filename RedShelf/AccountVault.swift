@@ -20,6 +20,7 @@ struct SavedAccount: Codable, Equatable, Identifiable {
     let id: String
     var name: String
     var session: StoredSession
+    var avatar: URL? = nil
 }
 
 private func validSession(_ session: StoredSession) -> Bool {
@@ -63,11 +64,12 @@ struct AccountVault: Codable, Equatable {
         return account.session
     }
 
-    mutating func rename(id: String, to name: String) throws {
+    mutating func updateProfile(id: String, name: String, avatar: URL?) throws {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { throw FeedError.unavailable }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw FeedError.invalidResponse }
         accounts[index].name = trimmed
+        if let avatar { accounts[index].avatar = avatar }
     }
 
     mutating func remove(id: String) {

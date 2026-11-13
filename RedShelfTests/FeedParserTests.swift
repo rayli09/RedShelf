@@ -2,6 +2,13 @@ import XCTest
 @testable import RedShelf
 
 final class FeedParserTests: XCTestCase {
+    func testPaginationStartsBeforeTheEnd() {
+        XCTAssertFalse(PaginationPrefetch.shouldLoad(index: 27, count: 40, lookahead: 12))
+        XCTAssertTrue(PaginationPrefetch.shouldLoad(index: 28, count: 40, lookahead: 12))
+        XCTAssertTrue(PaginationPrefetch.shouldLoad(index: 0, count: 4, lookahead: 12))
+        XCTAssertFalse(PaginationPrefetch.shouldLoad(index: 0, count: 0, lookahead: 12))
+        XCTAssertFalse(PaginationPrefetch.shouldLoad(index: 40, count: 40, lookahead: 12))
+    }
     func testParsesFeedCardAndVideoMetadata() throws {
         let html = #"<script>window.__INITIAL_STATE__={"feed":{"feeds":[{"id":"note-1","noteCard":{"type":"video","displayTitle":"示例","user":{"nickname":"作者"},"cover":{"urlDefault":"https://example.com/image.jpg"},"interactInfo":{"likedCount":"42"}}}]}};</script>"#
         let result = try FeedParser.parse(html)
@@ -154,6 +161,31 @@ final class FeedParserTests: XCTestCase {
     func testFeedCoverCanUseInfoList() throws {
         let data: [String: Any] = ["items": [["id": "n1", "note_card": ["cover": ["info_list": [["url": "https://example.com/cover.jpg"]]]]]]]
         XCTAssertEqual(try FeedParser.parseHomeFeed(data).first?.cover?.absoluteString, "https://example.com/cover.jpg")
+    }
+
+    func testNoteCreationTimeUsesServiceTimestamp() throws {
+        for raw: Any in [1_700_000_000, 1_700_000_000_000 as Int64, "1700000000000"] {
+            let result: [String: Any] = ["items": [["note_card": ["title": "Test", "time": raw]]]]
+            XCTAssertEqual(try FeedParser.parseAPIDetail(result).createdAt?.timeIntervalSince1970, 1_700_000_000)
+        }
+        for raw: Any in [0, -1, true, "invalid"] {
+            let result: [String: Any] = ["items": [["note_card": ["title": "Test", "time": raw]]]]
+            XCTAssertNil(try FeedParser.parseAPIDetail(result).createdAt)
+        }
+    }
+
+    func testImageURLsUseHTTPSForKnownCDNs() throws {
+        let result: [String: Any] = ["items": [["id": "n1", "note_card": [
+            "cover": ["info_list": [["url": "http://img.xhscdn.com/image.webp?x=1%2B2"]]],
+            "user": ["avatar": "http://img.rednotecdn.com/avatar"]
+        ]]]]
+        let note = try XCTUnwrap(FeedParser.parseHomeFeed(result).first)
+        XCTAssertEqual(note.cover?.absoluteString, "https://img.xhscdn.com/image.webp?x=1%2B2")
+        XCTAssertEqual(note.avatar?.absoluteString, "https://img.rednotecdn.com/avatar")
+        let detail: [String: Any] = ["items": [["note_card": ["image_list": [["url_default": "http://img.xhscdn.com/full"]]]]]]
+        XCTAssertEqual(try FeedParser.parseAPIDetail(detail).images.first?.absoluteString, "https://img.xhscdn.com/full")
+        let other: [String: Any] = ["items": [["id": "n2", "note_card": ["cover": ["url": "http://xhscdn.com.example.org/image"]]]]]
+        XCTAssertEqual(try FeedParser.parseHomeFeed(other).first?.cover?.scheme, "http")
     }
 
     func testFeedIgnoresEmptyOuterTokenAndEmptyTitle() throws {

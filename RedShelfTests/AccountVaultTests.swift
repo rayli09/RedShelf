@@ -14,6 +14,10 @@ final class AccountVaultTests: XCTestCase {
         XCTAssertEqual(vault.active?.id, "two")
         XCTAssertEqual(try vault.activate(id: "one"), first.session)
         XCTAssertEqual(vault.active?.id, "one")
+        let avatar = try XCTUnwrap(URL(string: "https://example.com/avatar.png"))
+        try vault.updateProfile(id: "one", name: "Updated", avatar: avatar)
+        XCTAssertEqual(vault.active?.avatar, avatar)
+        XCTAssertNil(vault.accounts.first(where: { $0.id == "two" })?.avatar)
         XCTAssertThrowsError(try vault.activate(id: "missing"))
         XCTAssertEqual(vault.active?.id, "one")
         let restored = try JSONDecoder().decode(AccountVault.self, from: JSONEncoder().encode(vault))
@@ -28,6 +32,8 @@ final class AccountVaultTests: XCTestCase {
         let invalid = SavedAccount(id: "one", name: "", session: StoredSession(cookies: [:], sessionKey: nil))
         XCTAssertThrowsError(try vault.save(invalid))
         XCTAssertTrue(vault.accounts.isEmpty)
+        let existing = #"{"accounts":[{"id":"x","name":"a","session":{"cookies":{"a1":"a","webId":"a","web_session":"a"},"region":"xiaohongshu"}}],"activeID":"x"}"#
+        XCTAssertNil(try JSONDecoder().decode(AccountVault.self, from: Data(existing.utf8)).active?.avatar)
         let duplicate = #"{"accounts":[{"id":"x","name":"a","session":{"cookies":{"a1":"a","webId":"a","web_session":"a"},"region":"xiaohongshu"}},{"id":"x","name":"b","session":{"cookies":{"a1":"b","webId":"b","web_session":"b"},"region":"xiaohongshu"}}]}"#
         XCTAssertThrowsError(try JSONDecoder().decode(AccountVault.self, from: Data(duplicate.utf8)))
         let missingActive = #"{"accounts":[],"activeID":"missing"}"#

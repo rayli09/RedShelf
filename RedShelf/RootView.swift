@@ -2,6 +2,16 @@ import SwiftUI
 import AVKit
 import CoreImage.CIFilterBuiltins
 
+private enum AppTypography {
+    static let pageTitle: Font = .title.bold()
+    static let sectionTitle: Font = .title2.weight(.semibold)
+    static let contentTitle: Font = .title3.weight(.semibold)
+    static let heading: Font = .headline
+    static let body: Font = .body
+    static let secondary: Font = .callout
+    static let caption: Font = .caption
+}
+
 private enum UIEnvironment {
     static var useFixtures: Bool {
         #if DEBUG
@@ -20,22 +30,21 @@ private enum UIEnvironment {
 }
 
 private enum Page: String, CaseIterable {
-    case recommendations = "推荐", video = "视频", live = "直播", search = "搜索", profile = "我的", settings = "设置"
+    case recommendations = "推荐", video = "视频", search = "搜索", settings = "设置", account = "账号"
     var symbol: String {
         switch self {
         case .recommendations: return "rectangle.badge.plus"
         case .video: return "play.rectangle.fill"
-        case .live: return "dot.radiowaves.left.and.right"
         case .search: return "magnifyingglass"
-        case .profile: return "person.crop.circle"
         case .settings: return "gearshape"
+        case .account: return "person.crop.circle"
         }
     }
 }
 
 @MainActor
 private final class FeedModel: ObservableObject {
-    struct Account: Identifiable { let id: String; let name: String; let isActive: Bool }
+    struct Account: Identifiable { let id: String; let name: String; let isActive: Bool; var avatar: URL? = nil }
     enum SessionState { case checking, signedOut, signedIn }
     @Published private(set) var sessionState: SessionState = .checking
     @Published var notes: [FeedNote] = []
@@ -44,6 +53,7 @@ private final class FeedModel: ObservableObject {
     @Published private(set) var loadingMore = false
     @Published private(set) var paginationError: String?
     @Published var accountError: String?
+    @Published var sessionNotice: String?
     @Published private(set) var accounts: [Account] = []
     private var cursor = ""
     var hasMore: Bool { !cursor.isEmpty }
@@ -81,17 +91,26 @@ private final class FeedModel: ObservableObject {
     }
 
     func didLogIn() async {
+        sessionNotice = nil
         await reloadAccounts()
         sessionState = .signedIn
         await refresh()
     }
 
+    func sessionExpired() async {
+        clearFeed()
+        sessionNotice = "登录已过期，请重新扫码登录。"
+        sessionState = .signedOut
+        await reloadAccounts()
+    }
+
     func reloadAccounts() async {
         guard !UIEnvironment.useFixtures, let client = SignedClient.shared else { return }
-        accounts = await client.accounts.map { Account(id: $0.id, name: $0.name, isActive: $0.isActive) }
+        accounts = await client.accounts.map { Account(id: $0.id, name: $0.name, isActive: $0.isActive, avatar: $0.avatar) }
     }
 
     private func clearFeed() {
+        DetailImageCache.shared.clear()
         generation += 1
         notes = []
         cursor = ""
@@ -153,6 +172,9 @@ private final class FeedModel: ObservableObject {
 
     func refresh() async {
         guard !loading else { return }
+        #if DEBUG
+        if UIEnvironment.useFixtures { return }
+        #endif
         generation += 1
         let current = generation
         loadingMore = false
@@ -176,6 +198,7 @@ private final class FeedModel: ObservableObject {
         }
         catch { if current == generation { self.error = error.localizedDescription } }
     }
+
 
     func signOut() async {
         guard sessionState == .signedIn else { return }
@@ -308,8 +331,7 @@ private final class LoginModel: ObservableObject {
 struct RootView: View {
     @State private var page: Page = .recommendations
     @State private var selectedNote: FeedNote?
-    @State private var selectedLive: LiveRoom?
-    @State private var showAccounts = false
+    @State private var accountAvatar: UIImage?
     @StateObject private var model = FeedModel()
     @StateObject private var loginModel = LoginModel()
 
@@ -321,47 +343,83 @@ struct RootView: View {
                     content(for: item)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .focusSection()
-                        .tabItem { Label(item.rawValue, systemImage: item.symbol) }
+                        .tabItem {
+                            if item == .account, let accountAvatar {
+                                Label { Text(item.rawValue) } icon: { Image(uiImage: accountAvatar).renderingMode(.original) }
+                            } else { Label(item.rawValue, systemImage: item.symbol) }
+                        }
                         .tag(item)
                 }
             }
         }
+        .font(AppTypography.body)
         .preferredColorScheme(.dark)
-        .task { await model.restoreSession() }
-        .fullScreenCover(item: $selectedNote) { NoteDetailView(note: $0) }
-        .fullScreenCover(item: $selectedLive) { LivePlayerView(room: $0) }
-        .sheet(isPresented: $showAccounts) {
-            AccountPicker(model: model, dismiss: { showAccounts = false }, select: { id in
-                Task {
-                    let wasSignedOut = model.sessionState == .signedOut
-                    if wasSignedOut { loginModel.reset() }
-                    if await model.switchAccount(id) {
-                        loginModel.reset()
-                        showAccounts = false
-                        page = .recommendations
-                    } else if wasSignedOut {
-                        loginModel.retry(onSuccess: loginSucceeded)
-                    }
-                }
-            }, add: {
-                Task {
-                    if await model.addAccount() {
-                        loginModel.reset()
-                        showAccounts = false
-                        page = .recommendations
-                    }
-                }
-            })
+        .task {
+            await model.restoreSession()
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing-expired-session") {
+                NotificationCenter.default.post(name: .redShelfSessionExpired, object: nil)
+            }
+            #endif
         }
+        .task(id: model.accounts.first(where: \.isActive)?.id) { await loadAccountAvatar() }
+        .onReceive(NotificationCenter.default.publisher(for: .redShelfSessionExpired).receive(on: RunLoop.main)) { _ in
+            loginModel.reset()
+            selectedNote = nil
+            page = .recommendations
+            Task { await model.sessionExpired() }
+        }
+        .fullScreenCover(item: $selectedNote) { NoteDetailView(note: $0) }
     }
 
     private var login: some View {
-        LoginView(model: loginModel, showAccounts: model.accounts.isEmpty ? nil : { showAccounts = true }, onSuccess: loginSucceeded)
+        LoginView(model: loginModel, showAccounts: model.accounts.isEmpty ? nil : { page = .account }, notice: model.sessionNotice, onSuccess: loginSucceeded)
     }
 
     private func loginSucceeded() {
         page = .recommendations
         Task { await model.didLogIn() }
+    }
+
+    @MainActor private func loadAccountAvatar() async {
+        accountAvatar = nil
+        guard !UIEnvironment.useFixtures, let expectedID = model.accounts.first(where: \.isActive)?.id,
+              let client = SignedClient.shared else { return }
+        do {
+            var profile = try await client.profile()
+            guard profile.id == expectedID else { return }
+            if profile.avatar == nil, let details = try? await client.profileDetails(profile) { profile = details }
+            await model.reloadAccounts()
+            guard let url = profile.avatar else {
+                #if DEBUG
+                print("[RedShelf.Avatar] event=missing_url")
+                #endif
+                return
+            }
+            let (data, response) = try await URLSession.shared.data(from: url)
+            try Task.checkCancellation()
+            guard model.accounts.first(where: \.isActive)?.id == expectedID, let image = UIImage(data: data) else {
+                #if DEBUG
+                print("[RedShelf.Avatar] event=image_unavailable status=\((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                #endif
+                return
+            }
+            let size = CGSize(width: 32, height: 32)
+            accountAvatar = UIGraphicsImageRenderer(size: size).image { context in
+                UIBezierPath(ovalIn: CGRect(origin: .zero, size: size)).addClip()
+                let scale = max(size.width / image.size.width, size.height / image.size.height)
+                let scaled = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+                image.draw(in: CGRect(x: (size.width - scaled.width) / 2, y: (size.height - scaled.height) / 2, width: scaled.width, height: scaled.height))
+            }.withRenderingMode(.alwaysOriginal)
+            #if DEBUG
+            print("[RedShelf.Avatar] event=loaded")
+            #endif
+        } catch {
+            #if DEBUG
+            let failure = error as NSError
+            print("[RedShelf.Avatar] event=load_failed network=\(failure.domain == NSURLErrorDomain) code=\(failure.code)")
+            #endif
+        }
     }
 
     @ViewBuilder
@@ -381,31 +439,36 @@ struct RootView: View {
                 VideoFeedView(model: model, selectedNote: $selectedNote,
                               isActive: self.page == .video && selectedNote == nil)
             }
-        case .live:
-            switch model.sessionState {
-            case .checking: ProgressView()
-            case .signedOut: login
-            case .signedIn: LiveFeedView(selectedLive: $selectedLive)
-            }
         case .search:
             switch model.sessionState {
             case .checking: ProgressView()
             case .signedOut: login
             case .signedIn: SearchView(selectedNote: $selectedNote)
             }
-        case .profile:
-            switch model.sessionState {
-            case .checking: ProgressView()
-            case .signedOut: login
-            case .signedIn:
-                ProfileView(model: model, selectedNote: $selectedNote, showAccounts: { showAccounts = true }) {
-                    Task {
-                        await model.signOut()
-                        if model.sessionState == .signedOut { loginModel.reset() }
-                    }
+        case .settings:
+            SettingsView(model: model, loginModel: loginModel, selectedNote: $selectedNote,
+                         showAccounts: { self.page = .account }, onLoginSuccess: loginSucceeded) {
+                Task {
+                    await model.signOut()
+                    if model.sessionState == .signedOut { loginModel.reset() }
                 }
             }
-        case .settings: SettingsView()
+        case .account:
+            AccountPicker(model: model, select: { id in
+                Task {
+                    let wasSignedOut = model.sessionState == .signedOut
+                    if wasSignedOut { loginModel.reset() }
+                    if await model.switchAccount(id) { loginModel.reset() }
+                    else if wasSignedOut { loginModel.retry(onSuccess: loginSucceeded) }
+                }
+            }, add: {
+                Task {
+                    if await model.addAccount() {
+                        loginModel.reset()
+                        self.page = .recommendations
+                    }
+                }
+            })
         }
     }
 
@@ -416,13 +479,21 @@ struct RootView: View {
                     if model.loading { ProgressView() }
                     else {
                         Image(systemName: "rectangle.stack.badge.questionmark").font(.system(size: 60)).foregroundStyle(.secondary)
-                        Text(model.error ?? "暂无推荐内容").font(.title3)
+                        Text(model.error ?? "暂无推荐内容").font(AppTypography.contentTitle)
                         Button("重试") { Task { await model.refresh() } }
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    NoteGrid(notes: model.notes, select: { selectedNote = $0 }, onLastAppear: { Task { await model.loadMore() } })
+                    HStack {
+                        Button { Task { await model.refresh() } } label: { Label("刷新", systemImage: "arrow.clockwise") }
+                            .accessibilityIdentifier("feed.refresh")
+                            .disabled(model.loading)
+                        if model.loading { ProgressView() }
+                        if let error = model.error { Text(error).foregroundStyle(.secondary) }
+                        Spacer()
+                    }.padding(.horizontal, 48).padding(.top, 12).focusSection()
+                    NoteGrid(notes: model.notes, select: { selectedNote = $0 }, onApproachEnd: { Task { await model.loadMore() } })
                         .padding(.horizontal, 48).padding(.top, 20).padding(.bottom, 90)
                     if model.loadingMore { ProgressView().padding() }
                     if let error = model.paginationError {
@@ -438,8 +509,8 @@ struct RootView: View {
 
     private func unavailable(_ title: String, _ description: String) -> some View {
         VStack(spacing: 16) {
-            Text(title).font(.title2.weight(.semibold))
-            Text(description).font(.body).foregroundStyle(.secondary)
+            Text(title).font(AppTypography.sectionTitle)
+            Text(description).font(AppTypography.body).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -465,9 +536,9 @@ private struct ProfileView: View {
                     AsyncImage(url: profile?.avatar) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle").resizable().foregroundStyle(.secondary) }
                         .frame(width: 120, height: 120).clipShape(Circle())
                     VStack(alignment: .leading) {
-                        Text(profile?.name ?? "我的账号").font(.title2.weight(.semibold))
+                        Text(profile?.name ?? "我的账号").font(AppTypography.sectionTitle)
                         if let redID = profile?.redID, !redID.isEmpty { Text("小红书号：\(redID)").foregroundStyle(.secondary) }
-                        if let bio = profile?.biography, !bio.isEmpty { Text(bio).font(.callout).lineLimit(2) }
+                        if let bio = profile?.biography, !bio.isEmpty { Text(bio).font(AppTypography.secondary).lineLimit(2) }
                     }
                     Spacer()
                     if let profile {
@@ -524,8 +595,8 @@ private struct ProfileView: View {
 
     private func metric(_ count: String, _ label: String) -> some View {
         VStack(spacing: 6) {
-            Text(count).font(.system(size: 28, weight: .semibold))
-            Text(label).font(.system(size: 18)).foregroundStyle(.secondary)
+            Text(count).font(AppTypography.heading)
+            Text(label).font(AppTypography.secondary).foregroundStyle(.secondary)
         }
     }
 
@@ -659,15 +730,15 @@ private struct VideoFeedView: View {
                 AsyncImage(url: current.cover) { image in image.resizable().scaledToFit() } placeholder: { Color.black }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 10) {
                 if let current {
-                    Text(current.author).font(.headline)
-                    Text(current.title).font(.title3).lineLimit(2)
+                    Text(current.author).font(AppTypography.heading)
+                    Text(current.title).font(AppTypography.heading).lineLimit(2)
                 } else {
                     Text(model.loading ? "正在加载视频…" : "当前推荐中没有视频")
                 }
-                if let error { Text(error).font(.callout).foregroundStyle(.secondary) }
-                if playback.failed { Text("视频播放失败，请重试或查看下一个").font(.callout).foregroundStyle(.secondary) }
+                if let error { Text(error).font(AppTypography.secondary).foregroundStyle(.secondary) }
+                if playback.failed { Text("视频播放失败，请重试或查看下一个").font(AppTypography.secondary).foregroundStyle(.secondary) }
                 #if DEBUG
                 if UIEnvironment.useFixtures && playback.hasAdvanced {
                     Text("测试视频正在播放").accessibilityIdentifier("video.fixture.playing")
@@ -679,10 +750,10 @@ private struct VideoFeedView: View {
                     Text("测试播放实例 \(playback.generation)").accessibilityIdentifier("video.fixture.instance")
                 }
                 #endif
-                if let error = model.paginationError { Text(error).font(.callout).foregroundStyle(.secondary) }
-                HStack {
-                    Button("上一个") { index -= 1 }.disabled(index == 0)
-                    Button("下一个") {
+                if let error = model.paginationError { Text(error).font(AppTypography.secondary).foregroundStyle(.secondary) }
+                HStack(spacing: 12) {
+                    Button { index -= 1 } label: { Label("上一个", systemImage: "chevron.up") }.disabled(index == 0)
+                    Button {
                         if index + 1 < videos.count { index += 1 }
                         else {
                             let previousIndex = index
@@ -691,13 +762,14 @@ private struct VideoFeedView: View {
                                 if index == previousIndex && index + 1 < videos.count { index += 1 }
                             }
                         }
-                    }.disabled(model.loadingMore || (index + 1 >= videos.count && !model.hasMore))
+                    } label: { Label("下一个", systemImage: "chevron.down") }
+                        .disabled(model.loadingMore || (index + 1 >= videos.count && !model.hasMore))
                         .accessibilityIdentifier("video.next")
                     if let current {
-                        Button("笔记详情") { selectedNote = current }
+                        Button { selectedNote = current } label: { Label("笔记详情", systemImage: "text.bubble") }
                     }
                     if playback.player != nil && !playback.failed {
-                        Button("播放控制") { showPlaybackControls = true }
+                        Button { showPlaybackControls = true } label: { Label("播放控制", systemImage: "playpause") }
                             .accessibilityIdentifier("video.controls")
                     }
                     if error != nil || playback.failed {
@@ -707,15 +779,15 @@ private struct VideoFeedView: View {
                         Button("重试加载") { Task { await model.retryLoadMore() } }
                     }
                     if let error = model.error, videos.isEmpty {
-                        Text(error).font(.callout).foregroundStyle(.secondary)
+                        Text(error).font(AppTypography.secondary).foregroundStyle(.secondary)
                         Button("重试推荐") { Task { await model.refresh() } }
                     }
                     if model.loadingMore { ProgressView() }
-                }
+                }.labelStyle(.iconOnly)
             }
-            .padding(32)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
-            .padding(48)
+            .padding(.horizontal, 48).padding(.top, 36).padding(.bottom, 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(LinearGradient(colors: [.clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom))
         }
         .fullScreenCover(isPresented: $showPlaybackControls) {
             if let player = playback.player {
@@ -771,21 +843,39 @@ private struct VideoFeedView: View {
 }
 
 private struct SettingsView: View {
+    @ObservedObject var model: FeedModel
+    @ObservedObject var loginModel: LoginModel
+    @Binding var selectedNote: FeedNote?
+    let showAccounts: () -> Void
+    let onLoginSuccess: () -> Void
+    let signOut: () -> Void
     @AppStorage("autoplayNoteVideos") private var autoplay = true
 
     var body: some View {
-        Form {
+        NavigationStack {
+          Form {
+            Section("账号") {
+                NavigationLink {
+                    if model.sessionState == .signedIn {
+                        ProfileView(model: model, selectedNote: $selectedNote, showAccounts: showAccounts, signOut: signOut)
+                    } else {
+                        LoginView(model: loginModel, showAccounts: model.accounts.isEmpty ? nil : showAccounts, notice: model.sessionNotice, onSuccess: onLoginSuccess)
+                    }
+                } label: { Label("我的账号", systemImage: "person.crop.circle") }
+                    .accessibilityIdentifier("settings.account")
+            }
             Section("播放") {
                 Toggle("自动播放笔记视频", isOn: $autoplay)
                     .accessibilityIdentifier("settings.autoplay")
                 Text("关闭后，打开视频时可用遥控器手动播放。直播不受此设置影响。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(AppTypography.secondary).foregroundStyle(.secondary)
             }
             Section("关于") {
                 LabeledContent("版本", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版")
                 Text("RedShelf 是独立客户端，与小红书无关联。")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .font(AppTypography.secondary).foregroundStyle(.secondary)
             }
+          }
         }
     }
 }
@@ -808,17 +898,19 @@ private struct LiveFeedView: View {
                     ForEach(rooms) { room in
                         VStack(alignment: .leading, spacing: 12) {
                             Button { selectedLive = room } label: {
-                                AsyncImage(url: room.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
-                                    .frame(height: 438).frame(maxWidth: .infinity).clipped()
+                                GeometryReader { geometry in
+                                    AsyncImage(url: room.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
+                                        .frame(width: geometry.size.width, height: 438).clipped()
+                                }.frame(height: 438)
                                     .overlay(alignment: .topTrailing) {
                                         Label("直播中", systemImage: "dot.radiowaves.left.and.right")
-                                            .font(.system(size: 16, weight: .semibold)).padding(6).background(.thinMaterial, in: Capsule()).padding(10)
+                                            .font(AppTypography.caption.weight(.semibold)).padding(6).background(.thinMaterial, in: Capsule()).padding(10)
                                     }
                             }.buttonStyle(.card).accessibilityIdentifier("live.\(room.id)")
                                 .accessibilityLabel("\(room.title)，\(room.host)")
-                            Text(room.title).font(.system(size: 24, weight: .semibold)).lineLimit(1)
+                            Text(room.title).font(AppTypography.heading).lineLimit(1)
                             HStack { Text(room.host); Spacer(); if !room.viewers.isEmpty { Label(room.viewers, systemImage: "person.2") } }
-                                .font(.system(size: 18)).foregroundStyle(.secondary)
+                                .font(AppTypography.secondary).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1030,7 +1122,7 @@ private struct SearchView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                Text("搜索").font(.title2.bold())
+                Text("搜索").font(AppTypography.sectionTitle)
                 TextField("搜索笔记或用户", text: $keyword)
                     .accessibilityIdentifier("search.field")
                     .onSubmit { model.search(keyword: keyword, filter: filter) }
@@ -1057,7 +1149,7 @@ private struct SearchView: View {
                             HStack(spacing: 24) {
                                 AsyncImage(url: user.avatar) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle").resizable().foregroundStyle(.secondary) }
                                     .frame(width: 80, height: 80).clipShape(Circle())
-                                VStack(alignment: .leading) { Text(user.name); if !user.redID.isEmpty { Text("小红书号：\(user.redID)").font(.caption).foregroundStyle(.secondary) } }
+                                VStack(alignment: .leading) { Text(user.name); if !user.redID.isEmpty { Text("小红书号：\(user.redID)").font(AppTypography.caption).foregroundStyle(.secondary) } }
                                 Spacer()
                             }
                         }.accessibilityIdentifier("search.user.\(user.id)")
@@ -1097,9 +1189,9 @@ private struct UserSearchProfileView: View {
                 HStack(spacing: 24) {
                     AsyncImage(url: user.avatar) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle").resizable().foregroundStyle(.secondary) }
                         .frame(width: 100, height: 100).clipShape(Circle())
-                    VStack(alignment: .leading) { Text(user.name).font(.title2.bold()); if !user.redID.isEmpty { Text("小红书号：\(user.redID)").foregroundStyle(.secondary) } }
+                    VStack(alignment: .leading) { Text(user.name).font(AppTypography.sectionTitle); if !user.redID.isEmpty { Text("小红书号：\(user.redID)").foregroundStyle(.secondary) } }
                 }
-                Text("笔记").font(.title3.bold())
+                Text("笔记").font(AppTypography.contentTitle)
                 if let error { Text(error).foregroundStyle(.secondary); Button("重试") { Task { await load() } } }
                 else if notes.isEmpty && !loading { Text("暂无公开笔记").foregroundStyle(.secondary) }
                 NoteGrid(notes: notes, select: { selectedNote = $0 })
@@ -1138,18 +1230,20 @@ private struct UserSearchProfileView: View {
 private struct LoginView: View {
     @ObservedObject var model: LoginModel
     let showAccounts: (() -> Void)?
+    var notice: String? = nil
     let onSuccess: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
-            Text("登录小红书").font(.title.bold())
+            Text("登录小红书").font(AppTypography.pageTitle)
+            if let notice { Text(notice).font(AppTypography.secondary).foregroundStyle(.secondary) }
             if let image = model.image {
                 Image(uiImage: image).interpolation(.none).resizable().frame(width: 380, height: 380).padding(20).background(.white)
                     .accessibilityIdentifier("login.qr")
             } else if model.failed {
                 Image(systemName: "exclamationmark.circle").font(.system(size: 80)).foregroundStyle(.secondary).frame(width: 420, height: 420)
             } else { ProgressView().frame(width: 420, height: 420) }
-            Text(model.message).font(.title3).foregroundStyle(.secondary)
+            Text(model.message).font(AppTypography.contentTitle).foregroundStyle(.secondary)
             Button("重新生成") { model.retry(onSuccess: onSuccess) }
                 .accessibilityIdentifier("login.retry")
             if let showAccounts {
@@ -1164,45 +1258,93 @@ private struct LoginView: View {
 
 private struct AccountPicker: View {
     @ObservedObject var model: FeedModel
-    let dismiss: () -> Void
     let select: (String) -> Void
     let add: () -> Void
 
     var body: some View {
         VStack(spacing: 24) {
-            Text("切换账号").font(.title.bold())
+            Text("切换账号").font(AppTypography.pageTitle)
             ForEach(model.accounts) { account in
                 Button { select(account.id) } label: {
                     HStack {
+                        AsyncImage(url: account.avatar) { image in image.resizable().scaledToFill() } placeholder: {
+                            Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(.secondary)
+                        }.frame(width: 48, height: 48).clipShape(Circle())
                         Text(account.name)
                         Spacer()
                         if account.isActive { Image(systemName: "checkmark") }
                     }.frame(width: 500)
                 }.accessibilityIdentifier("account.\(account.id)")
+                    .accessibilityValue(account.isActive ? "当前账号" : "")
             }
             Button("添加账号", action: add).accessibilityIdentifier("account.add")
-            Button("取消", action: dismiss)
             if model.sessionState == .checking { ProgressView() }
             if let error = model.accountError { Text(error).foregroundStyle(.secondary) }
         }.padding(60)
     }
 }
 
+@MainActor
+private final class DetailImageCache {
+    static let shared = DetailImageCache()
+    private let cache = NSCache<NSURL, UIImage>()
+    private var pending: [URL: Task<UIImage?, Never>] = [:]
+    private var generation = 0
+
+    private init() { cache.totalCostLimit = 64 * 1024 * 1024 }
+
+    func clear() {
+        generation += 1
+        pending.values.forEach { $0.cancel() }
+        pending.removeAll()
+        cache.removeAllObjects()
+    }
+
+    func image(for url: URL) async -> UIImage? {
+        if let image = cache.object(forKey: url as NSURL) { return image }
+        if let task = pending[url] {
+            let current = generation
+            let image = await task.value
+            return current == generation && !Task.isCancelled ? image : nil
+        }
+        let current = generation
+        let task = Task<UIImage?, Never> {
+            if url.isFileURL { return UIImage(contentsOfFile: url.path) }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard !Task.isCancelled, let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode), data.count <= 20 * 1024 * 1024 else { return nil }
+                return UIImage(data: data)
+            } catch { return nil }
+        }
+        pending[url] = task
+        let image = await task.value
+        guard current == generation else { return nil }
+        pending[url] = nil
+        if let image {
+            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+            cache.setObject(image, forKey: url as NSURL, cost: cost)
+        }
+        return Task.isCancelled ? nil : image
+    }
+}
+
 private struct DetailImage: View {
     let url: URL
     let contentMode: ContentMode
+    @State private var image: UIImage?
 
     var body: some View {
         Group {
-            #if DEBUG
-            if url.isFileURL, let image = UIImage(contentsOfFile: url.path) {
+            if let image {
                 Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode).clipShape(RoundedRectangle(cornerRadius: 22))
-            } else {
-                AsyncImage(url: url) { image in image.resizable().aspectRatio(contentMode: contentMode).clipShape(RoundedRectangle(cornerRadius: 22)) } placeholder: { Color.white.opacity(0.08) }
-            }
-            #else
-            AsyncImage(url: url) { image in image.resizable().aspectRatio(contentMode: contentMode).clipShape(RoundedRectangle(cornerRadius: 22)) } placeholder: { Color.white.opacity(0.08) }
-            #endif
+            } else { Color.white.opacity(0.08) }
+        }
+        .task(id: url) {
+            image = nil
+            let loaded = await DetailImageCache.shared.image(for: url)
+            guard !Task.isCancelled else { return }
+            image = loaded
         }
     }
 }
@@ -1213,7 +1355,9 @@ private struct NoteDetailView: View {
     @State private var detail: NoteDetail?
     @State private var error: String?
     @State private var selectedImage = 0
-    @State private var descriptionExpanded = false
+    @FocusState private var focusedImage: Int?
+    @State private var viewingText = false
+    @State private var descriptionExpanded = true
     @FocusState private var descriptionFocused: Bool
     @StateObject private var playback = PlaybackModel()
     @AppStorage("autoplayNoteVideos") private var autoplay = true
@@ -1249,21 +1393,22 @@ private struct NoteDetailView: View {
                             .accessibilityLabel("图片 \(selectedImage + 1)/\(images.count)")
                             .accessibilityIdentifier("detail.mainImage")
                         if images.count > 1 {
-                            ScrollView(.horizontal) {
-                                HStack {
-                                    ForEach(images.indices, id: \.self) { index in
-                                        Button { selectedImage = index } label: {
-                                            DetailImage(url: images[index], contentMode: .fill)
-                                                .frame(width: 68, height: 92).clipped().clipShape(RoundedRectangle(cornerRadius: 8))
-                                        }.buttonStyle(.card).accessibilityIdentifier("detail.image.\(index)")
+                            HStack(spacing: 20) {
+                                ScrollView(.horizontal) {
+                                    HStack {
+                                        ForEach(images.indices, id: \.self) { index in
+                                            Button { selectedImage = index } label: {
+                                                DetailImage(url: images[index], contentMode: .fill)
+                                                    .frame(width: 68, height: 92).clipped().clipShape(RoundedRectangle(cornerRadius: 8))
+                                            }.buttonStyle(.card).focused($focusedImage, equals: index)
+                                                .accessibilityIdentifier("detail.image.\(index)")
+                                        }
                                     }
-                                }
-                            }.frame(height: 110).padding(.horizontal, 36)
-                            Button { descriptionFocused = true } label: {
-                                Label("查看正文和评论", systemImage: "arrow.down")
-                            }.buttonStyle(.plain).font(.system(size: 18)).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("detail.showText")
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 36)
+                                }.frame(height: 110).focusSection()
+                                Button { viewingText = true; descriptionFocused = true } label: {
+                                    Label("正文和评论", systemImage: "arrow.right")
+                                }.disabled(viewingText).accessibilityIdentifier("detail.showText")
+                            }.padding(.horizontal, 36).focusSection()
                         }
                     }.padding(.vertical, 30)
                 } else if let error {
@@ -1271,16 +1416,23 @@ private struct NoteDetailView: View {
                 } else if detail != nil {
                     Text("暂无可显示的媒体").foregroundStyle(.secondary)
                 } else { ProgressView() }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity).focusSection()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    Button { dismiss() } label: { Label("返回", systemImage: "chevron.left") }
+                        .accessibilityIdentifier("detail.back")
                     HStack(spacing: 14) {
                         AsyncImage(url: note.avatar) { image in image.resizable().scaledToFill() } placeholder: { Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(.secondary) }
                             .frame(width: 52, height: 52).clipShape(Circle())
-                        Text(detail?.author ?? note.author).font(.system(size: 24, weight: .semibold))
+                        Text(detail?.author ?? note.author).font(AppTypography.heading)
                     }
-                    Text(detail?.title ?? note.title).font(.system(size: 26, weight: .bold))
-                    Text(detail?.description ?? "").font(.system(size: 24)).lineLimit(descriptionExpanded ? nil : 10)
+                    Text(detail?.title ?? note.title).font(AppTypography.contentTitle)
+                    if let createdAt = detail?.createdAt {
+                        Text("发布于 \(createdAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(AppTypography.secondary).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("detail.createdAt")
+                    }
+                    Text(detail?.description ?? "").font(AppTypography.body).lineLimit(descriptionExpanded ? nil : 10)
                         .focusable().focused($descriptionFocused)
                     #if DEBUG
                     if UIEnvironment.useFixtures && playback.hasAdvanced {
@@ -1304,7 +1456,7 @@ private struct NoteDetailView: View {
                             }
                         }
                     }
-                    if let interactionError { Text(interactionError).font(.callout).foregroundStyle(.secondary) }
+                    if let interactionError { Text(interactionError).font(AppTypography.secondary).foregroundStyle(.secondary) }
                     if let url = detail?.video, playback.player == nil {
                         Button("播放视频") { playback.play(url) }
                     }
@@ -1313,29 +1465,42 @@ private struct NoteDetailView: View {
                 .padding(32)
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 24))
                 .padding(28)
-                VStack(alignment: .leading, spacing: 20) {
-                    Text(detail?.commentCount.isEmpty == false ? "评论 \(detail?.commentCount ?? "")" : "评论").font(.title3.bold())
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if let images = detail?.images, !images.isEmpty {
+                        Button { focusedImage = min(selectedImage, images.count - 1) } label: {
+                            Label("返回图片", systemImage: "arrow.left")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.buttonStyle(.plain).accessibilityIdentifier("detail.showImages")
+                    }
+                    Text(detail?.commentCount.isEmpty == false ? "评论 \(detail?.commentCount ?? "")" : "评论").font(AppTypography.contentTitle)
                     if let commentsError {
-                        Text(commentsError).font(.callout).foregroundStyle(.secondary)
+                        Text(commentsError).font(AppTypography.secondary).foregroundStyle(.secondary)
                         Button("重试") { Task { await loadComments() } }
                     } else if commentsLoaded && comments.isEmpty {
-                        Text("暂无评论").font(.callout).foregroundStyle(.secondary)
+                        Text("暂无评论").font(AppTypography.secondary).foregroundStyle(.secondary)
                     }
                     ForEach(comments) { comment in
                         CommentThreadView(comment: comment, note: note)
+                            .onAppear {
+                                if comment.id == comments.last?.id && commentsHaveMore && !commentsLoading {
+                                    Task { await loadComments() }
+                                }
+                            }
                     }
                     if commentsLoading { ProgressView() }
-                    if commentsHaveMore && !commentsLoading && commentsError == nil {
-                        Button("加载更多") { Task { await loadComments() } }
-                    }
                 }.padding(.horizontal, 28).padding(.bottom, 50)
             }
             .frame(width: 712)
             .background(Color(white: 0.12))
+            .focusSection()
         }
         .background(.black)
         .ignoresSafeArea()
         .onExitCommand { dismiss() }
+        .onChange(of: focusedImage) { index in
+            if let index { selectedImage = index; viewingText = false }
+        }
+        .onChange(of: descriptionFocused) { if $0 { viewingText = true } }
         .onDisappear { playback.stop() }
         .task {
             if UIEnvironment.useFixtures {
@@ -1346,7 +1511,13 @@ private struct NoteDetailView: View {
                 let images: [URL] = []
                 let video: URL? = nil
                 #endif
-                detail = NoteDetail(title: note.title, description: "用于界面验证的测试内容。", author: note.author,
+                #if DEBUG
+                let description = ProcessInfo.processInfo.arguments.contains("--ui-testing-long-description")
+                    ? String(repeating: "用于界面验证的测试内容。", count: 20) + "正文结尾" : "用于界面验证的测试内容。"
+                #else
+                let description = "用于界面验证的测试内容。"
+                #endif
+                detail = NoteDetail(title: note.title, description: description, author: note.author,
                                     images: images, video: video, liked: nil, collected: nil, likeCount: "", commentCount: "")
                 if let video { playback.play(video, automatically: autoplay) }
                 return
@@ -1430,37 +1601,58 @@ private struct CommentThreadView: View {
     @State private var loaded = false
     @State private var loading = false
     @State private var error: String?
+    @State private var expanded = false
+    @FocusState private var focused: Bool
+
+    private var canExpand: Bool { !comment.replyCount.isEmpty && comment.replyCount != "0" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            commentRow(comment)
-                .focusable().accessibilityElement(children: .combine)
-                .accessibilityIdentifier("comment.\(comment.id)")
-            ForEach(replies) { reply in
-                commentRow(reply).padding(.leading, 42).focusable().accessibilityElement(children: .combine)
+        VStack(alignment: .leading, spacing: 6) {
+            if canExpand {
+                Button {
+                    expanded.toggle()
+                    if expanded && !loaded { Task { await loadReplies() } }
+                } label: { commentRow(comment, showReplyHint: true) }
+                    .buttonStyle(.plain).focused($focused)
+                    .accessibilityIdentifier("comment.\(comment.id)")
+            } else {
+                commentRow(comment).focusable().focused($focused)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("comment.\(comment.id)")
             }
-            if loaded && replies.isEmpty && !loading && error == nil { Text("暂无回复").font(.callout).foregroundStyle(.secondary) }
-            if let error { Text(error).font(.callout).foregroundStyle(.secondary) }
-            if loading { ProgressView() }
-            else if error != nil || hasMore || (!loaded && !comment.replyCount.isEmpty && comment.replyCount != "0") {
-                Button(error != nil ? "重试回复" : (loaded ? "加载更多回复" : "查看回复 \(comment.replyCount)")) {
-                    Task { await loadReplies() }
-                }.accessibilityIdentifier("comment.replies.\(comment.id)")
+            if expanded {
+                ForEach(replies) { reply in
+                    commentRow(reply).padding(.leading, 36).focusable().accessibilityElement(children: .combine)
+                }
+                if loaded && replies.isEmpty && !loading && error == nil { Text("暂无回复").font(AppTypography.secondary).foregroundStyle(.secondary) }
+                if let error { Text(error).font(AppTypography.secondary).foregroundStyle(.secondary) }
+                if loading { ProgressView() }
+                else if error != nil || hasMore {
+                    Button(error != nil ? "重试回复" : "加载更多回复") { Task { await loadReplies() } }
+                        .buttonStyle(.plain).font(AppTypography.secondary).accessibilityIdentifier("comment.replies.\(comment.id)")
+                }
             }
         }
     }
 
-    private func commentRow(_ item: NoteComment) -> some View {
-        HStack(alignment: .top, spacing: 14) {
+    private func commentRow(_ item: NoteComment, showReplyHint: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 12) {
             AsyncImage(url: item.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
-                .frame(width: 46, height: 46).clipShape(Circle())
-            VStack(alignment: .leading, spacing: 8) {
-                Text(item.author).font(.callout).foregroundStyle(.secondary)
-                Text(item.content).font(.body)
-                if !item.likes.isEmpty { Label(item.likes, systemImage: "heart").font(.caption).foregroundStyle(.secondary) }
+                .frame(width: 38, height: 38).clipShape(Circle())
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(item.author).font(AppTypography.secondary).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if !item.likes.isEmpty { Label(item.likes, systemImage: "heart").font(AppTypography.caption).foregroundStyle(.secondary) }
+                }
+                Text(item.content).font(AppTypography.secondary)
+                if showReplyHint {
+                    Text(expanded ? "收起回复" : "\(item.replyCount) 条回复")
+                        .font(AppTypography.caption).foregroundStyle(.secondary)
+                }
             }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+            .background(Color.white.opacity(focused ? 0.15 : 0.04), in: RoundedRectangle(cornerRadius: 12))
     }
 
     @MainActor private func loadReplies() async {
@@ -1490,17 +1682,17 @@ private struct CommentThreadView: View {
 private struct NoteGrid: View {
     let notes: [FeedNote]
     let select: (FeedNote) -> Void
-    var onLastAppear: (() -> Void)? = nil
+    var onApproachEnd: (() -> Void)? = nil
 
     var body: some View {
-        HStack(alignment: .top, spacing: 48) {
-            ForEach(0..<4, id: \.self) { column in
-                LazyVStack(spacing: 80) {
-                    ForEach(Array(notes.enumerated()).filter { $0.offset % 4 == column }, id: \.element.id) { entry in
-                        NoteCard(note: entry.element, select: { select(entry.element) })
-                            .onAppear { if entry.offset == notes.count - 1 { onLastAppear?() } }
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 44, alignment: .top), count: 3), alignment: .leading, spacing: 64) {
+            ForEach(Array(notes.enumerated()), id: \.element.id) { entry in
+                NoteCard(note: entry.element, select: { select(entry.element) })
+                    .onAppear {
+                        if PaginationPrefetch.shouldLoad(index: entry.offset, count: notes.count, lookahead: 12) {
+                            onApproachEnd?()
+                        }
                     }
-                }.frame(maxWidth: .infinity, alignment: .top)
             }
         }
     }
@@ -1509,27 +1701,62 @@ private struct NoteGrid: View {
 private struct NoteCard: View {
     let note: FeedNote
     let select: () -> Void
+    @FocusState private var focused: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             Button(action: select) {
-                AsyncImage(url: note.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
-                    .frame(height: 500).frame(maxWidth: .infinity).clipped().clipShape(RoundedRectangle(cornerRadius: 18))
+                GeometryReader { geometry in
+                    AsyncImage(url: note.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
+                        .frame(width: geometry.size.width, height: 600).clipped()
+                }.frame(height: 600).clipShape(RoundedRectangle(cornerRadius: 18))
                     .overlay(alignment: .topTrailing) {
                         if note.isVideo { Image(systemName: "play.circle.fill").padding(14) }
                     }
-            }.buttonStyle(.card).accessibilityIdentifier("note.\(note.id)")
+            }.buttonStyle(.card).focused($focused).accessibilityIdentifier("note.\(note.id)")
                 .accessibilityLabel("\(note.title)，\(note.author)")
-            Text(note.title).font(.system(size: 24, weight: .semibold)).lineLimit(2)
-            HStack(spacing: 8) {
-                AsyncImage(url: note.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
-                    .frame(width: 28, height: 28).clipShape(Circle())
-                Text(note.author).lineLimit(1)
-                Spacer(minLength: 0)
-                HStack(spacing: 6) {
-                    Image(systemName: "heart")
-                    Text(note.likes)
+                .task(id: focused) {
+                    guard focused, !UIEnvironment.useFixtures else { return }
+                    do {
+                        try await Task.sleep(nanoseconds: 500_000_000)
+                        #if DEBUG
+                        print("[RedShelf.Perf] event=detail_prefetch_started")
+                        #endif
+                        guard let client = SignedClient.shared else { return }
+                        async let comments = try? client.comments(for: note)
+                        let detail = try await client.noteDetail(for: note)
+                        try Task.checkCancellation()
+                        if let first = detail.images.first { _ = await DetailImageCache.shared.image(for: first) }
+                        _ = await comments
+                        #if DEBUG
+                        print("[RedShelf.Perf] event=detail_prefetch_finished")
+                        #endif
+                    } catch { }
                 }
-            }.font(.system(size: 20)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(note.title).font(AppTypography.heading).lineLimit(2)
+                HStack(spacing: 8) {
+                    AsyncImage(url: note.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
+                        .frame(width: 28, height: 28).clipShape(Circle())
+                    Text(note.author).lineLimit(1)
+                    Spacer(minLength: 0)
+                    HStack(spacing: 6) {
+                        Image(systemName: "heart")
+                        Text(note.likes)
+                    }
+                }.font(AppTypography.secondary).foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if focused {
+                    if #available(tvOS 26.0, *) {
+                        Color.clear.glassEffect(.regular, in: .rect(cornerRadius: 16))
+                    } else {
+                        RoundedRectangle(cornerRadius: 16).fill(.ultraThinMaterial)
+                    }
+                }
+            }
+            .padding(.top, 36)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

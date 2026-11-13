@@ -3,6 +3,10 @@ import CoreFoundation
 import Security
 import Signer
 
+extension Notification.Name {
+    static let redShelfSessionExpired = Notification.Name("RedShelfSessionExpired")
+}
+
 struct LoginChallenge {
     let id: String
     let code: String
@@ -92,6 +96,19 @@ private final class RestrictedRedirects: NSObject, URLSessionTaskDelegate {
 }
 
 actor SignedClient {
+    private struct DetailKey: Hashable {
+        let id: String
+        let token: String
+        let source: String
+    }
+    private struct CachedDetail {
+        let value: NoteDetail
+        let expires: Date
+    }
+    private struct CachedComments {
+        let value: CommentPage
+        let expires: Date
+    }
     static let shared = try? SignedClient()
     private static let agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0"
     private let session: URLSession
@@ -105,6 +122,23 @@ actor SignedClient {
     private var authenticated: Bool
     private var lastLoggedQRStatus: Int?
     private var sessionGeneration = 0
+    private var detailVersion = 0
+    private var detailCache: [DetailKey: CachedDetail] = [:]
+    private var detailOrder: [DetailKey] = []
+    private var detailRequests: [DetailKey: Task<NoteDetail, Error>] = [:]
+    private var commentCache: [DetailKey: CachedComments] = [:]
+    private var commentRequests: [DetailKey: Task<CommentPage, Error>] = [:]
+
+    private func clearDetailCache() {
+        detailVersion += 1
+        detailRequests.values.forEach { $0.cancel() }
+        commentRequests.values.forEach { $0.cancel() }
+        detailRequests.removeAll()
+        commentRequests.removeAll()
+        detailCache.removeAll()
+        commentCache.removeAll()
+        detailOrder.removeAll()
+    }
 
     // These diagnostics intentionally contain no request bodies, URLs with
     // query strings, account identifiers, cookies, signatures, or QR values.
@@ -162,8 +196,8 @@ actor SignedClient {
 
     var isLoggedIn: Bool { authenticated }
 
-    var accounts: [(id: String, name: String, isActive: Bool)] {
-        vault.accounts.map { ($0.id, $0.name, authenticated && $0.id == vault.activeID) }
+    var accounts: [(id: String, name: String, avatar: URL?, isActive: Bool)] {
+        vault.accounts.map { ($0.id, $0.name, $0.avatar, authenticated && $0.id == vault.activeID) }
     }
 
     func beginAddingAccount() throws {
@@ -172,6 +206,7 @@ actor SignedClient {
         if let error { throw error }
         let fresh = try JSONDecoder().decode([String: String].self, from: Data(raw.utf8))
         try signer.setSessionKey(nil)
+        clearDetailCache()
         sessionGeneration += 1
         cookies = fresh
         sessionKey = nil
@@ -186,6 +221,7 @@ actor SignedClient {
         try signer.setSessionKey(stored.sessionKey)
         do { try saveVault(next) }
         catch { try? signer.setSessionKey(sessionKey); throw error }
+        clearDetailCache()
         sessionGeneration += 1
         vault = next
         cookies = stored.cookies
@@ -198,13 +234,7 @@ actor SignedClient {
         guard authenticated else { throw FeedError.unavailable }
         let profile = try FeedParser.parseUserProfile(await call(method: "GET", uri: "/api/sns/web/v2/user/me", body: ""))
         guard profile.id == vault.activeID else { throw LoginRequestError.identityMismatch }
-        if let active = vault.active, !profile.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           active.name != profile.name {
-            var next = vault
-            try next.rename(id: profile.id, to: profile.name)
-            do { try saveVault(next); vault = next }
-            catch { log("event=account_name_save_failed") }
-        }
+        persistProfile(profile)
         return profile
     }
 
@@ -213,7 +243,21 @@ actor SignedClient {
         let uri = try queryURI(path: "/api/sns/web/v1/user/otherinfo", parameters: ["target_user_id": base.id])
         let result = try await call(method: "GET", uri: uri, body: "")
         guard authenticated, base.id == vault.activeID else { throw CancellationError() }
-        return try FeedParser.parseProfileDetails(result, base: base)
+        let details = try FeedParser.parseProfileDetails(result, base: base)
+        persistProfile(details)
+        return details
+    }
+
+    private func persistProfile(_ profile: UserProfile) {
+        guard let active = vault.active, active.id == profile.id,
+              !profile.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              active.name != profile.name || (profile.avatar != nil && active.avatar != profile.avatar) else { return }
+        var next = vault
+        do {
+            try next.updateProfile(id: profile.id, name: profile.name, avatar: profile.avatar)
+            try saveVault(next)
+            vault = next
+        } catch { log("event=account_profile_save_failed") }
     }
 
     func userNotes(_ collection: UserNoteCollection, userID: String, cursor: String = "") async throws -> UserNotePage {
@@ -246,6 +290,7 @@ actor SignedClient {
             try? signer.setSessionKey(sessionKey)
             throw error
         }
+        clearDetailCache()
         sessionGeneration += 1
         vault = next
         cookies = freshCookies
@@ -295,6 +340,48 @@ actor SignedClient {
     func noteDetail(for note: FeedNote) async throws -> NoteDetail {
         guard authenticated else { throw FeedError.unavailable }
         guard !note.accessToken.isEmpty else { throw FeedError.noteUnavailable }
+        let key = DetailKey(id: note.id, token: note.accessToken, source: note.source)
+        let generation = sessionGeneration, version = detailVersion
+        if let cached = detailCache[key], cached.expires > Date() {
+            #if DEBUG
+            print("[RedShelf.Perf] event=detail_cache_hit")
+            #endif
+            detailOrder.removeAll { $0 == key }
+            detailOrder.append(key)
+            return cached.value
+        }
+        if let pending = detailRequests[key] {
+            #if DEBUG
+            print("[RedShelf.Perf] event=detail_request_shared")
+            #endif
+            let value = try await pending.value
+            try Task.checkCancellation()
+            guard generation == sessionGeneration, version == detailVersion else { throw CancellationError() }
+            return value
+        }
+        let request = Task { try await self.fetchNoteDetail(for: note) }
+        detailRequests[key] = request
+        do {
+            let value = try await request.value
+            guard generation == sessionGeneration, version == detailVersion else { throw CancellationError() }
+            detailRequests[key] = nil
+            detailCache[key] = CachedDetail(value: value, expires: Date().addingTimeInterval(60))
+            detailOrder.removeAll { $0 == key }
+            detailOrder.append(key)
+            while detailOrder.count > 24 {
+                let evicted = detailOrder.removeFirst()
+                detailCache[evicted] = nil
+                commentCache[evicted] = nil
+            }
+            try Task.checkCancellation()
+            return value
+        } catch {
+            if generation == sessionGeneration && version == detailVersion { detailRequests[key] = nil }
+            throw error
+        }
+    }
+
+    private func fetchNoteDetail(for note: FeedNote) async throws -> NoteDetail {
         let payload: [String: Any] = ["source_note_id": note.id,
                                       "image_formats": ["jpg", "webp", "avif"],
                                       "extra": ["need_body_topic": "1"],
@@ -306,6 +393,36 @@ actor SignedClient {
 
     func comments(for note: FeedNote, cursor: String = "") async throws -> CommentPage {
         guard authenticated, !note.accessToken.isEmpty else { throw FeedError.unavailable }
+        guard cursor.isEmpty else { return try await fetchComments(for: note, cursor: cursor) }
+        let key = DetailKey(id: note.id, token: note.accessToken, source: note.source)
+        let generation = sessionGeneration, version = detailVersion
+        if let cached = commentCache[key], cached.expires > Date() { return cached.value }
+        if let pending = commentRequests[key] {
+            let value = try await pending.value
+            try Task.checkCancellation()
+            guard generation == sessionGeneration, version == detailVersion else { throw CancellationError() }
+            return value
+        }
+        let request = Task { try await self.fetchComments(for: note, cursor: "") }
+        commentRequests[key] = request
+        do {
+            let value = try await request.value
+            guard generation == sessionGeneration, version == detailVersion else { throw CancellationError() }
+            commentRequests[key] = nil
+            commentCache[key] = CachedComments(value: value, expires: Date().addingTimeInterval(30))
+            if commentCache.count > 24 {
+                let oldest = commentCache.min { $0.value.expires < $1.value.expires }?.key
+                if let oldest { commentCache[oldest] = nil }
+            }
+            try Task.checkCancellation()
+            return value
+        } catch {
+            if generation == sessionGeneration && version == detailVersion { commentRequests[key] = nil }
+            throw error
+        }
+    }
+
+    private func fetchComments(for note: FeedNote, cursor: String) async throws -> CommentPage {
         let uri = try queryURI(path: "/api/sns/web/v2/comment/page", parameters: [
             "note_id": note.id, "cursor": cursor, "top_comment_id": "",
             "image_formats": "jpg,webp,avif", "xsec_token": note.accessToken,
@@ -327,6 +444,7 @@ actor SignedClient {
         let body = try JSONEncoder().encode(["note_oid": noteID])
         guard let text = String(data: body, encoding: .utf8) else { throw FeedError.invalidResponse }
         _ = try await call(method: "POST", uri: value ? "/api/sns/web/v1/note/like" : "/api/sns/web/v1/note/dislike", body: text, allowEmptyData: true)
+        clearDetailCache()
     }
 
     func setCollected(_ value: Bool, noteID: String) async throws {
@@ -334,6 +452,7 @@ actor SignedClient {
         let body = try JSONEncoder().encode([value ? "note_id" : "note_ids": noteID])
         guard let text = String(data: body, encoding: .utf8) else { throw FeedError.invalidResponse }
         _ = try await call(method: "POST", uri: value ? "/api/sns/web/v1/note/collect" : "/api/sns/web/v1/note/uncollect", body: text, allowEmptyData: true)
+        clearDetailCache()
     }
 
     func newSearchID() throws -> String { try signer.newSearchID() }
@@ -370,6 +489,17 @@ actor SignedClient {
     }
 
     func beginLogin() async throws -> LoginChallenge {
+        if !authenticated, vault.active != nil {
+            var error: NSError?
+            let raw = SignerNewSession(&error)
+            if let error { throw error }
+            let fresh = try JSONDecoder().decode([String: String].self, from: Data(raw.utf8))
+            try signer.setSessionKey(nil)
+            cookies = fresh
+            sessionKey = nil
+            region = .xiaohongshu
+        }
+        clearDetailCache()
         sessionGeneration += 1
         lastLoggedQRStatus = nil
         log("event=begin_login")
@@ -452,6 +582,7 @@ actor SignedClient {
                     var fresh = try JSONDecoder().decode([String: String].self, from: Data(raw.utf8))
                     if let webID, !webID.isEmpty { fresh["webId"] = webID }
                     try signer.setSessionKey(nil)
+                    clearDetailCache()
                     sessionGeneration += 1
                     currentGeneration = sessionGeneration
                     cookies = fresh
@@ -567,9 +698,9 @@ actor SignedClient {
 
     private func persistVerifiedSession(userID: String) throws {
         var next = vault
-        let existingName = next.accounts.first { $0.id == userID }?.name
-        try next.save(SavedAccount(id: userID, name: existingName ?? "小红书账号 \(next.accounts.count + 1)",
-                                   session: StoredSession(cookies: cookies, sessionKey: sessionKey, region: region)))
+        let existing = next.accounts.first { $0.id == userID }
+        try next.save(SavedAccount(id: userID, name: existing?.name ?? "小红书账号 \(next.accounts.count + 1)",
+                                   session: StoredSession(cookies: cookies, sessionKey: sessionKey, region: region), avatar: existing?.avatar))
         try saveVault(next)
         vault = next
         authenticated = true
@@ -627,6 +758,7 @@ actor SignedClient {
         do { (raw, response) = try await session.data(for: request) }
         catch is CancellationError { throw CancellationError() }
         catch {
+            if Task.isCancelled { throw CancellationError() }
             log("event=network_failure")
             throw LoginRequestError.network
         }
@@ -646,6 +778,13 @@ actor SignedClient {
             let code = envelope["code"] as? Int ?? -1
             let category = errorCategory((envelope["msg"] as? String) ?? (envelope["message"] as? String) ?? "")
             log("event=api_error endpoint=\(url.path) code=\(code) category=\(category)")
+            if authenticated && [-100, -101, -104].contains(code) {
+                clearDetailCache()
+                sessionGeneration += 1
+                authenticated = false
+                NotificationCenter.default.post(name: .redShelfSessionExpired, object: nil)
+                throw FeedError.sessionExpired
+            }
             if [300011, 300012, 300013, 300015, 461, 471].contains(code) || category == "risk" {
                 throw LoginRequestError.risk(code)
             }
