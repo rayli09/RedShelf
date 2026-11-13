@@ -133,12 +133,14 @@ enum FeedError: LocalizedError {
     case unavailable
     case invalidResponse
     case liveUnavailable
+    case noteUnavailable
 
     var errorDescription: String? {
         switch self {
         case .unavailable: return "小红书暂未返回推荐内容，可能需要登录。"
         case .invalidResponse: return "无法读取推荐内容，请稍后重试。"
         case .liveUnavailable: return "直播已结束、受限或没有可播放的 HLS 视频。"
+        case .noteUnavailable: return "无法获取该笔记，可能已删除、不可见或需要重新登录。"
         }
     }
 }
@@ -158,7 +160,7 @@ struct FeedService {
     }
 
     func detail(for note: FeedNote) async throws -> NoteDetail {
-        guard !note.accessToken.isEmpty else { throw FeedError.unavailable }
+        guard !note.accessToken.isEmpty else { throw FeedError.noteUnavailable }
         var components = URLComponents(string: "https://www.xiaohongshu.com/explore/\(note.id)")!
         components.queryItems = [URLQueryItem(name: "xsec_token", value: note.accessToken), URLQueryItem(name: "xsec_source", value: note.source)]
         guard let url = components.url else { throw FeedError.invalidResponse }
@@ -190,8 +192,8 @@ enum FeedParser {
     }
 
     static func parseAPIDetail(_ result: [String: Any]) throws -> NoteDetail {
-        guard let items = result["items"] as? [[String: Any]],
-              let note = items.first?["note_card"] as? [String: Any] else { throw FeedError.invalidResponse }
+        guard let items = result["items"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        guard let note = items.first?["note_card"] as? [String: Any], !note.isEmpty else { throw FeedError.noteUnavailable }
         let user = note["user"] as? [String: Any] ?? [:]
         let images = (note["image_list"] as? [[String: Any]] ?? []).compactMap(imageURL)
         let video = note["video"] as? [String: Any]
@@ -366,7 +368,7 @@ enum FeedParser {
         let root = try state(html)
         guard let container = root["note"] as? [String: Any],
               let details = container["noteDetailMap"] as? [String: Any],
-              let entry = details[id] as? [String: Any], let note = entry["note"] as? [String: Any] else { throw FeedError.unavailable }
+              let entry = details[id] as? [String: Any], let note = entry["note"] as? [String: Any], !note.isEmpty else { throw FeedError.noteUnavailable }
         let user = note["user"] as? [String: Any] ?? [:]
         let images = (note["imageList"] as? [[String: Any]] ?? []).compactMap { image in
             ((image["urlDefault"] as? String) ?? (image["url"] as? String)).flatMap(URL.init(string:))
@@ -419,6 +421,9 @@ enum FeedParser {
             } else if input[index...].hasPrefix("undefined") {
                 output += "null"
                 index = input.index(index, offsetBy: 9)
+            } else if input[index...].hasPrefix("new Set([])") {
+                output += "[]"
+                index = input.index(index, offsetBy: 11)
             } else {
                 output.append(character)
                 index = input.index(after: index)

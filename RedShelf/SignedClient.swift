@@ -293,7 +293,8 @@ actor SignedClient {
     }
 
     func noteDetail(for note: FeedNote) async throws -> NoteDetail {
-        guard authenticated, !note.accessToken.isEmpty else { throw FeedError.unavailable }
+        guard authenticated else { throw FeedError.unavailable }
+        guard !note.accessToken.isEmpty else { throw FeedError.noteUnavailable }
         let payload: [String: Any] = ["source_note_id": note.id,
                                       "image_formats": ["jpg", "webp", "avif"],
                                       "extra": ["need_body_topic": "1"],

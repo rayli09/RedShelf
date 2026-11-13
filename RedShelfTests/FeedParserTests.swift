@@ -25,6 +25,23 @@ final class FeedParserTests: XCTestCase {
         XCTAssertEqual(try FeedParser.parse(html).first?.title, "value:undefined")
     }
 
+    func testEmptySetInHydrationDoesNotChangeStringsOrExecuteCode() throws {
+        let html = #"<script>window.__INITIAL_STATE__={"other":new Set([]),"feed":{"feeds":[{"id":"1","noteCard":{"displayTitle":"new Set([])"}}]}};</script>"#
+        XCTAssertEqual(try FeedParser.parse(html).first?.title, "new Set([])")
+        let executable = #"<script>window.__INITIAL_STATE__={"other":alert(1),"feed":{"feeds":[]}};</script>"#
+        XCTAssertThrowsError(try FeedParser.parse(executable))
+    }
+
+    func testUnavailableNoteInValidHydrationReportsMissingContent() throws {
+        let html = #"<script>window.__INITIAL_STATE__={"other":new Set([]),"note":{"noteDetailMap":{"undefined":{"note":{}}}}};</script>"#
+        XCTAssertThrowsError(try FeedParser.parseDetail(html, id: "requested")) { error in
+            guard case FeedError.noteUnavailable = error else { return XCTFail("Expected unavailable note") }
+        }
+        XCTAssertThrowsError(try FeedParser.parseAPIDetail(["items": []])) { error in
+            guard case FeedError.noteUnavailable = error else { return XCTFail("Expected unavailable note") }
+        }
+    }
+
     func testNoteDetailContainsImagesAndPlayableStream() throws {
         let html = #"<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"1":{"note":{"title":"标题","desc":"内容","user":{"nickname":"作者"},"imageList":[{"urlDefault":"https://example.com/image.jpg"}],"video":{"media":{"stream":{"h264":[{"masterUrl":"https://example.com/video.mp4"}]}}}}}}}};</script>"#
         let detail = try FeedParser.parseDetail(html, id: "1")
