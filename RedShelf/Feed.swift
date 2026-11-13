@@ -139,7 +139,7 @@ enum FeedError: LocalizedError {
         switch self {
         case .unavailable: return "小红书暂未返回推荐内容，可能需要登录。"
         case .invalidResponse: return "无法读取推荐内容，请稍后重试。"
-        case .liveUnavailable: return "直播已结束、受限或没有可播放的 HLS 视频。"
+        case .liveUnavailable: return "暂时无法获取直播；可能已结束、受限或没有可播放的 HLS 视频。"
         case .noteUnavailable: return "无法获取该笔记，可能已删除、不可见或需要重新登录。"
         }
     }
