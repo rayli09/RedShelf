@@ -806,19 +806,20 @@ private struct LiveFeedView: View {
                 } else if rooms.isEmpty && !loading { Text("暂无直播").foregroundStyle(.secondary) }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 48, alignment: .top), count: 4), spacing: 60) {
                     ForEach(rooms) { room in
-                        Button { selectedLive = room } label: {
-                            VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Button { selectedLive = room } label: {
                                 AsyncImage(url: room.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
                                     .frame(height: 438).frame(maxWidth: .infinity).clipped()
                                     .overlay(alignment: .topTrailing) {
                                         Label("直播中", systemImage: "dot.radiowaves.left.and.right")
                                             .font(.system(size: 16, weight: .semibold)).padding(6).background(.thinMaterial, in: Capsule()).padding(10)
                                     }
-                                Text(room.title).font(.system(size: 24, weight: .semibold)).lineLimit(1)
-                                HStack { Text(room.host); Spacer(); if !room.viewers.isEmpty { Label(room.viewers, systemImage: "person.2") } }
-                                    .font(.system(size: 18)).foregroundStyle(.secondary)
-                            }
-                        }.buttonStyle(.card).accessibilityIdentifier("live.\(room.id)")
+                            }.buttonStyle(.card).accessibilityIdentifier("live.\(room.id)")
+                                .accessibilityLabel("\(room.title)，\(room.host)")
+                            Text(room.title).font(.system(size: 24, weight: .semibold)).lineLimit(1)
+                            HStack { Text(room.host); Spacer(); if !room.viewers.isEmpty { Label(room.viewers, systemImage: "person.2") } }
+                                .font(.system(size: 18)).foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Button("刷新") { Task { await load() } }.disabled(loading)
@@ -1496,9 +1497,7 @@ private struct NoteGrid: View {
             ForEach(0..<4, id: \.self) { column in
                 LazyVStack(spacing: 80) {
                     ForEach(Array(notes.enumerated()).filter { $0.offset % 4 == column }, id: \.element.id) { entry in
-                        Button { select(entry.element) } label: { NoteCard(note: entry.element) }
-                            .buttonStyle(.card)
-                            .accessibilityIdentifier("note.\(entry.element.id)")
+                        NoteCard(note: entry.element, select: { select(entry.element) })
                             .onAppear { if entry.offset == notes.count - 1 { onLastAppear?() } }
                     }
                 }.frame(maxWidth: .infinity, alignment: .top)
@@ -1509,13 +1508,17 @@ private struct NoteGrid: View {
 
 private struct NoteCard: View {
     let note: FeedNote
+    let select: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            AsyncImage(url: note.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
-                .frame(height: 500).frame(maxWidth: .infinity).clipped().clipShape(RoundedRectangle(cornerRadius: 18))
-                .overlay(alignment: .topTrailing) {
-                    if note.isVideo { Image(systemName: "play.circle.fill").padding(14) }
-                }
+            Button(action: select) {
+                AsyncImage(url: note.cover) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.08) }
+                    .frame(height: 500).frame(maxWidth: .infinity).clipped().clipShape(RoundedRectangle(cornerRadius: 18))
+                    .overlay(alignment: .topTrailing) {
+                        if note.isVideo { Image(systemName: "play.circle.fill").padding(14) }
+                    }
+            }.buttonStyle(.card).accessibilityIdentifier("note.\(note.id)")
+                .accessibilityLabel("\(note.title)，\(note.author)")
             Text(note.title).font(.system(size: 24, weight: .semibold)).lineLimit(2)
             HStack(spacing: 8) {
                 AsyncImage(url: note.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
