@@ -394,6 +394,7 @@ actor SignedClient {
         do {
             let guest = try await call(method: "POST", uri: "/api/sns/web/v1/login/activate", body: body)
             applySession(from: guest)
+            guard cookies["web_session"]?.isEmpty == false else { throw LoginRequestError.malformed }
             guard let encrypted = guest["ssk"] as? String, !encrypted.isEmpty else { throw LoginRequestError.malformed }
             let key = try exchange.decrypt(encrypted)
             try signer.setSessionKey(key)

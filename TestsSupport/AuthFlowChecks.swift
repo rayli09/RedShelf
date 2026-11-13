@@ -132,6 +132,7 @@ private struct AuthFlowChecks {
         try await riskErrorIsActionableAndRedacted()
         try await guestIdentityMustNotPersist()
         try await invalidGuestKeyStopsLogin()
+        try await missingGuestSessionStopsLogin()
         try await newLoginInvalidatesOldActivation()
         try await restoredSessionRetainsItsSigningKey()
         try await localSignOutClearsSession()
@@ -673,6 +674,33 @@ private struct AuthFlowChecks {
         }
         try expect(activations == 2 && !createdQR, "invalid guest key must stop before creating a QR")
         try expect(!(await client.isLoggedIn), "invalid guest key must not authenticate")
+    }
+
+    private static func missingGuestSessionStopsLogin() async throws {
+        let serverKey = Curve25519.KeyAgreement.PrivateKey()
+        var createdQR = false
+        MockServer.handler = { request in
+            switch request.url?.path {
+            case "/api/sns/web/v1/login/activate":
+                let body = try JSONSerialization.jsonObject(with: requestBody(request)) as? [String: String]
+                guard let encoded = body?["client_public_key_base64"], let bytes = Data(base64Encoded: encoded) else { throw TestFailure.unexpectedRequest }
+                let secret = try serverKey.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: bytes))
+                let key = secret.withUnsafeBytes { SymmetricKey(data: Data($0)) }
+                let box = try AES.GCM.seal(Data(repeating: 0x41, count: 32), using: key)
+                let encrypted = (Data(box.nonce) + box.ciphertext + box.tag).base64EncodedString()
+                return (200, "{\"success\":true,\"data\":{\"ssk\":\"\(encrypted)\"}}")
+            case "/api/sns/web/v1/login/qrcode/create":
+                createdQR = true
+                throw TestFailure.unexpectedRequest
+            default: throw TestFailure.unexpectedRequest
+            }
+        }
+        let client = try makeClient(serverPublicKey: serverKey.publicKey.rawRepresentation) { _ in throw TestFailure.failed("must not persist") }
+        do { _ = try await client.beginLogin(); throw TestFailure.failed("missing guest session accepted") }
+        catch is TestFailure { throw TestFailure.failed("missing guest session accepted") }
+        catch { }
+        let loggedIn = await client.isLoggedIn
+        try expect(!createdQR && !loggedIn, "missing guest session started login")
     }
 
     private static func newLoginInvalidatesOldActivation() async throws {
