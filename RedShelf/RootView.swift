@@ -1270,6 +1270,11 @@ private struct NoteDetailView: View {
                     Text(detail?.title ?? note.title).font(.system(size: 26, weight: .bold))
                     Text(detail?.description ?? "").font(.system(size: 24)).lineLimit(descriptionExpanded ? nil : 10)
                         .focusable().focused($descriptionFocused)
+                    #if DEBUG
+                    if UIEnvironment.useFixtures && playback.hasAdvanced {
+                        Text("测试详情视频正在播放").accessibilityIdentifier("detail.video.playing")
+                    }
+                    #endif
                     if (detail?.description.count ?? 0) > 200 {
                         Button(descriptionExpanded ? "收起" : "展开全文") { descriptionExpanded.toggle() }
                     }
@@ -1324,11 +1329,14 @@ private struct NoteDetailView: View {
             if UIEnvironment.useFixtures {
                 #if DEBUG
                 let images = ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-images") ? ((try? DebugPlaybackFixture.images()) ?? []) : []
+                let video = ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-video") ? (try? DebugPlaybackFixture.url()) : nil
                 #else
                 let images: [URL] = []
+                let video: URL? = nil
                 #endif
                 detail = NoteDetail(title: note.title, description: "用于界面验证的测试内容。", author: note.author,
-                                    images: images, video: nil, liked: nil, collected: nil, likeCount: "", commentCount: "")
+                                    images: images, video: video, liked: nil, collected: nil, likeCount: "", commentCount: "")
+                if let video { playback.play(video, automatically: autoplay) }
                 return
             }
             do {
@@ -1348,7 +1356,7 @@ private struct NoteDetailView: View {
         }
         .task {
             if UIEnvironment.useFixtures {
-                if ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-images") {
+                if ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-images") || ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-video") {
                     comments = [NoteComment(id: "fixture-comment", author: "测试读者", avatar: nil, content: "测试评论", likes: "1", replyCount: "2")]
                 }
                 commentsLoaded = true

@@ -76,6 +76,28 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["测试回复"].waitForExistence(timeout: 10))
     }
 
+    func testPlayingNoteVideoCanReachComments() {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-reset-settings", "--ui-testing-detail-video"]
+        app.launch()
+        XCTAssertTrue(app.buttons["note.fixture-0"].waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.down)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["detail.video.playing"].waitForExistence(timeout: 10))
+        let comment = app.descendants(matching: .any).matching(identifier: "comment.fixture-comment").firstMatch
+        XCTAssertTrue(comment.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !comment.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<5 where !comment.hasFocus { XCUIRemote.shared.press(.down) }
+        XCTAssertTrue(comment.hasFocus, "Comments must be reachable while a note video is playing")
+        XCUIRemote.shared.press(.left)
+        XCTAssertFalse(comment.hasFocus, "Remote should be able to leave comments for the player")
+        XCTAssertTrue(app.otherElements["Media Controls"].waitForExistence(timeout: 10))
+        XCUIRemote.shared.press(.playPause)
+        for _ in 0..<5 where !comment.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<5 where !comment.hasFocus { XCUIRemote.shared.press(.down) }
+        XCTAssertTrue(comment.hasFocus, "Remote should return from the player to comments")
+    }
+
     func testSearchTabShowsNativeSearchField() {
         let searchTab = app.buttons["搜索"]
         XCTAssertTrue(searchTab.waitForExistence(timeout: 15), "Search tab did not appear")
