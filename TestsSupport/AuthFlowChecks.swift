@@ -644,7 +644,7 @@ private struct AuthFlowChecks {
             case "/api/sns/web/v1/feed":
                 let body = try JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any]
                 try expect(body?["xsec_token"] as? String == "a+b/c=", "detail lost note token")
-                return (200, #"{"success":true,"data":{"items":[{"note_card":{"title":"标题","desc":"内容","user":{"nickname":"作者"},"image_list":[{"url_default":"https://example.com/image.jpg"}]}}]}}"#)
+                return (200, #"{"success":true,"data":{"items":[{"note_card":{"title":"标题","desc":"内容","user":{"nickname":"作者"},"image_list":[{"info_list":[{"image_scene":"WB_DFT","url":"https://example.com/image.jpg"}]}],"video":{"media":{"stream":{"EF4":[{"master_url":"https://example.com/video.mp4"}]}}}}}]}}"#)
             case "/api/sns/web/v2/comment/page":
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
                 try expect(query.contains { $0.name == "xsec_token" && $0.value == "a+b/c=" }, "comments corrupted token")
@@ -709,7 +709,7 @@ private struct AuthFlowChecks {
         let next = try await client.homeFeed(cursor: feed.cursor, noteIndex: feed.notes.count)
         try expect(next.notes.first?.id == "note-2" && next.cursor.isEmpty, "feed pagination failed")
         let detail = try await client.noteDetail(for: feed.notes[0])
-        try expect(detail.title == "标题" && detail.images.count == 1, "detail not parsed")
+        try expect(detail.title == "标题" && detail.images.count == 1 && detail.video != nil, "detail not parsed")
         let comments = try await client.comments(for: feed.notes[0])
         try expect(comments.comments.first?.content == "评论", "comments not parsed")
         let searchID = try await client.newSearchID()

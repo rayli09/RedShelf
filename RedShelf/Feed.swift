@@ -181,19 +181,15 @@ enum FeedParser {
         guard let items = result["items"] as? [[String: Any]],
               let note = items.first?["note_card"] as? [String: Any] else { throw FeedError.invalidResponse }
         let user = note["user"] as? [String: Any] ?? [:]
-        let images = (note["image_list"] as? [[String: Any]] ?? []).compactMap { image in
-            ((image["url_default"] as? String) ?? (image["url"] as? String)).flatMap(URL.init(string:))
-        }
+        let images = (note["image_list"] as? [[String: Any]] ?? []).compactMap(imageURL)
         let video = note["video"] as? [String: Any]
         let media = video?["media"] as? [String: Any]
         let streams = media?["stream"] as? [String: Any]
-        let h264 = streams?["h264"] as? [[String: Any]] ?? []
-        let h265 = streams?["h265"] as? [[String: Any]] ?? []
-        let videoURL = (h264 + h265).compactMap { stream -> URL? in
-            guard let value = stream["master_url"] as? String, let url = URL(string: value),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
-            return url
-        }.first
+        let videoURL = ["h264", "EF4", "h265", "EF5"].lazy.flatMap { streams?[$0] as? [[String: Any]] ?? [] }
+            .compactMap { stream -> URL? in
+                let candidates = [stream["master_url"] as? String, stream["url"] as? String] + (stream["backup_urls"] as? [String] ?? []).map(Optional.some)
+                return candidates.compactMap(usableMediaURL).first
+            }.first
         let interactions = note["interact_info"] as? [String: Any] ?? [:]
         return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
                           author: user["nickname"] as? String ?? "", images: images, video: videoURL,
@@ -212,15 +208,31 @@ enum FeedParser {
             let interaction = card["interact_info"] as? [String: Any] ?? [:]
             let count = interaction["liked_count"]
             let likes = (count as? String) ?? (count as? NSNumber)?.stringValue ?? ""
+            let title = [card["title"] as? String, card["display_title"] as? String].compactMap { $0 }.first { !$0.isEmpty } ?? "无标题"
+            let token = [item["xsec_token"] as? String, card["xsec_token"] as? String].compactMap { $0 }.first { !$0.isEmpty } ?? ""
             return FeedNote(id: id,
-                            title: (card["title"] as? String) ?? (card["display_title"] as? String) ?? "无标题",
+                            title: title,
                             author: user["nickname"] as? String ?? "",
-                            cover: ((cover["url_default"] as? String) ?? (cover["url"] as? String)).flatMap(URL.init(string:)),
+                            cover: imageURL(cover),
                             avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
                             likes: likes,
                             isVideo: card["type"] as? String == "video",
-                            accessToken: (item["xsec_token"] as? String) ?? (card["xsec_token"] as? String) ?? "", source: source)
+                            accessToken: token, source: source)
         }
+    }
+
+    private static func usableMediaURL(_ value: String?) -> URL? {
+        guard let value, !value.isEmpty, let url = URL(string: value),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
+        return url
+    }
+
+    private static func imageURL(_ image: [String: Any]) -> URL? {
+        let list = image["info_list"] as? [[String: Any]] ?? []
+        let preferred = list.filter { $0["image_scene"] as? String == "WB_DFT" }
+        let candidates = (preferred + list).compactMap { $0["url"] as? String } +
+            [image["url_default"] as? String, image["url"] as? String].compactMap { $0 }
+        return candidates.compactMap { usableMediaURL($0) }.first
     }
 
     static func parseUserProfile(_ value: [String: Any]) throws -> UserProfile {

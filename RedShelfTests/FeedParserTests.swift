@@ -118,6 +118,34 @@ final class FeedParserTests: XCTestCase {
         XCTAssertEqual(try FeedParser.parseAPIDetail(data).video?.absoluteString, "https://example.com/video.mp4")
     }
 
+    func testDetailPrefersDefaultImageFromInfoList() throws {
+        let images: [[String: Any]] = [["info_list": [
+            ["image_scene": "WB_PRV", "url": "https://example.com/preview.jpg"],
+            ["image_scene": "WB_DFT", "url": "https://example.com/full.jpg"]
+        ]]]
+        let data: [String: Any] = ["items": [["note_card": ["image_list": images]]]]
+        XCTAssertEqual(try FeedParser.parseAPIDetail(data).images.first?.absoluteString, "https://example.com/full.jpg")
+    }
+
+    func testNewVideoCodecNamesAndBackupURLsArePlayable() throws {
+        let streams: [String: Any] = ["EF4": [["master_url": "", "backup_urls": ["https://example.com/stream.mp4"]]]]
+        let card: [String: Any] = ["video": ["media": ["stream": streams]]]
+        let data: [String: Any] = ["items": [["note_card": card]]]
+        XCTAssertEqual(try FeedParser.parseAPIDetail(data).video?.absoluteString, "https://example.com/stream.mp4")
+    }
+
+    func testFeedCoverCanUseInfoList() throws {
+        let data: [String: Any] = ["items": [["id": "n1", "note_card": ["cover": ["info_list": [["url": "https://example.com/cover.jpg"]]]]]]]
+        XCTAssertEqual(try FeedParser.parseHomeFeed(data).first?.cover?.absoluteString, "https://example.com/cover.jpg")
+    }
+
+    func testFeedIgnoresEmptyOuterTokenAndEmptyTitle() throws {
+        let data: [String: Any] = ["items": [["id": "n1", "xsec_token": "", "note_card": ["title": "", "display_title": "标题", "xsec_token": "inner-token"]]]]
+        let note = try XCTUnwrap(FeedParser.parseHomeFeed(data).first)
+        XCTAssertEqual(note.title, "标题")
+        XCTAssertEqual(note.accessToken, "inner-token")
+    }
+
     func testAuthenticatedNoteDetailReadsImagesAndVideo() throws {
         let result: [String: Any] = ["items": [["note_card": ["title": "测试",
             "desc": "内容", "user": ["nickname": "作者"], "interact_info": ["liked": true, "collected": false, "comment_count": "8"],
