@@ -12,6 +12,9 @@ targets:
     type: application
     platform: tvOS
     sources: [RedShelf]
+    dependencies:
+      - framework: Frameworks/Signer.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.rayli.redshelf

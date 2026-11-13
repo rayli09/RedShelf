@@ -5,7 +5,7 @@ let package = Package(
     name: "RedShelf",
     platforms: [.macOS(.v13), .tvOS(.v16)],
     targets: [
-        .target(name: "RedShelf", path: "RedShelf", exclude: ["RedShelfApp.swift", "RootView.swift"], sources: ["Feed.swift"]),
+        .target(name: "RedShelf", path: "RedShelf", exclude: ["RedShelfApp.swift", "RootView.swift", "SignedClient.swift"], sources: ["Feed.swift"]),
         .testTarget(name: "RedShelfTests", dependencies: ["RedShelf"], path: "RedShelfTests"),
     ]
 )

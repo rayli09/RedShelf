@@ -1,7 +1,7 @@
 # RedShelf
 
-Native tvOS client for browsing Xiaohongshu. The `RedShelf/` target owns the interface and network code; `RedShelfTests/` owns parser tests. The UI follows the public Rouge App Store screenshots as a visual reference; do not use Rouge branding or copied media.
+Native tvOS client for browsing Xiaohongshu. `RedShelf/` owns the app, `Signer/` the pinned Go signing bridge, and `RedShelfTests/` parser tests. Follow `README.md` for setup, verification, reference sources and current feature status. The UI uses Rouge's public App Store screenshots as visual reference; do not copy its branding or media.
 
-Generate the Xcode project with `xcodegen generate`; build with `xcodebuild -scheme RedShelf -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO build`. Run parser tests with `swift test`; run UI verification on a configured tvOS simulator or Apple TV.
+Run `./scripts/build-signer.sh` then `xcodegen generate`; build with `xcodebuild -scheme RedShelf -destination 'generic/platform=tvOS' CODE_SIGNING_ALLOWED=NO build`. Test with `swift test` and `(cd Signer && go test ./...)`. Check focus behavior on an Apple TV when changing UI.
 
-`project.yml` is the source of truth; `RedShelf.xcodeproj` is generated and ignored. Never commit credentials, cookies, personal content, or signing profiles. Keep authentication opt-in and use secure storage; do not describe inaccessible endpoints or sample data as working features. Test focus behavior on a real Apple TV before claiming visual parity.
+`project.yml` and Go source are authoritative. The Xcode project, framework and tool binaries are generated and ignored. Never commit credentials, cookies, personal content or signing profiles. Store session material in Keychain, never logs. Do not claim login, feeds or playback work until validated end to end on a real device.

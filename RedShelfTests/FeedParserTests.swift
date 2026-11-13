@@ -24,4 +24,20 @@ final class FeedParserTests: XCTestCase {
         let html = #"<script>window.__INITIAL_STATE__={"other":undefined,"feed":{"feeds":[{"id":"1","noteCard":{"displayTitle":"value:undefined"}}]}};</script>"#
         XCTAssertEqual(try FeedParser.parse(html).first?.title, "value:undefined")
     }
+
+    func testNoteDetailContainsImagesAndPlayableStream() throws {
+        let html = #"<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"1":{"note":{"title":"标题","desc":"内容","user":{"nickname":"作者"},"imageList":[{"urlDefault":"https://example.com/image.jpg"}],"video":{"media":{"stream":{"h264":[{"masterUrl":"https://example.com/video.mp4"}]}}}}}}}};</script>"#
+        let detail = try FeedParser.parseDetail(html, id: "1")
+        XCTAssertEqual(detail.title, "标题")
+        XCTAssertEqual(detail.images.count, 1)
+        XCTAssertEqual(detail.video?.absoluteString, "https://example.com/video.mp4")
+    }
+
+    func testQRLoginStatesRequireConfirmation() throws {
+        XCTAssertEqual(try QRLoginStatus(code: 0), .waiting)
+        XCTAssertEqual(try QRLoginStatus(code: 1), .scanned)
+        XCTAssertEqual(try QRLoginStatus(code: 2), .confirmed)
+        XCTAssertEqual(try QRLoginStatus(code: 3), .expired)
+        XCTAssertThrowsError(try QRLoginStatus(code: 99))
+    }
 }

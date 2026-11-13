@@ -4,3 +4,6 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 RedShelf.xcodeproj/
+
+.tools/
+Frameworks/

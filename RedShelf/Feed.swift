@@ -8,6 +8,29 @@ struct FeedNote: Identifiable, Equatable {
     let avatar: URL?
     let likes: String
     let isVideo: Bool
+    let accessToken: String
+}
+
+struct NoteDetail {
+    let title: String
+    let description: String
+    let author: String
+    let images: [URL]
+    let video: URL?
+}
+
+enum QRLoginStatus: Equatable {
+    case waiting, scanned, confirmed, expired
+
+    init(code: Int) throws {
+        switch code {
+        case 0: self = .waiting
+        case 1: self = .scanned
+        case 2: self = .confirmed
+        case 3: self = .expired
+        default: throw FeedError.invalidResponse
+        }
+    }
 }
 
 enum FeedError: LocalizedError {
@@ -35,19 +58,26 @@ struct FeedService {
         guard !notes.isEmpty else { throw FeedError.unavailable }
         return notes
     }
+
+    func detail(for note: FeedNote) async throws -> NoteDetail {
+        guard !note.accessToken.isEmpty else { throw FeedError.unavailable }
+        var components = URLComponents(string: "https://www.xiaohongshu.com/explore/\(note.id)")!
+        components.queryItems = [URLQueryItem(name: "xsec_token", value: note.accessToken), URLQueryItem(name: "xsec_source", value: "pc_feed")]
+        guard let url = components.url else { throw FeedError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
+              let html = String(data: data, encoding: .utf8) else { throw FeedError.invalidResponse }
+        return try FeedParser.parseDetail(html, id: note.id)
+    }
 }
 
 enum FeedParser {
     static func parse(_ html: String) throws -> [FeedNote] {
-        guard let start = html.range(of: "window.__INITIAL_STATE__"),
-              let equal = html.range(of: "=", range: start.upperBound..<html.endIndex),
-              let end = html.range(of: "</script>", range: equal.upperBound..<html.endIndex) else { throw FeedError.invalidResponse }
-        var raw = String(html[equal.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if raw.hasSuffix(";") { raw.removeLast() }
-        raw = normalizeUndefined(in: raw)
-        guard let data = raw.data(using: .utf8),
-              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let feed = root["feed"] as? [String: Any], let items = feed["feeds"] as? [[String: Any]] else { throw FeedError.invalidResponse }
+        let root = try state(html)
+        guard let feed = root["feed"] as? [String: Any], let items = feed["feeds"] as? [[String: Any]] else { throw FeedError.invalidResponse }
         return items.compactMap { item in
             guard let card = item["noteCard"] as? [String: Any],
                   let id = (item["id"] as? String) ?? (card["noteId"] as? String), !id.isEmpty else { return nil }
@@ -59,8 +89,38 @@ enum FeedParser {
                             cover: ((cover["urlDefault"] as? String) ?? (cover["url"] as? String)).flatMap(URL.init(string:)),
                             avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
                             likes: interactions["likedCount"] as? String ?? "",
-                            isVideo: card["type"] as? String == "video")
+                            isVideo: card["type"] as? String == "video", accessToken: item["xsecToken"] as? String ?? "")
         }
+    }
+
+    static func parseDetail(_ html: String, id: String) throws -> NoteDetail {
+        let root = try state(html)
+        guard let container = root["note"] as? [String: Any],
+              let details = container["noteDetailMap"] as? [String: Any],
+              let entry = details[id] as? [String: Any], let note = entry["note"] as? [String: Any] else { throw FeedError.unavailable }
+        let user = note["user"] as? [String: Any] ?? [:]
+        let images = (note["imageList"] as? [[String: Any]] ?? []).compactMap { image in
+            ((image["urlDefault"] as? String) ?? (image["url"] as? String)).flatMap(URL.init(string:))
+        }
+        let video = note["video"] as? [String: Any]
+        let media = video?["media"] as? [String: Any]
+        let streams = media?["stream"] as? [String: Any]
+        let h264 = streams?["h264"] as? [[String: Any]] ?? []
+        let videoURL = (h264.first?["masterUrl"] as? String).flatMap(URL.init(string:))
+        return NoteDetail(title: note["title"] as? String ?? "", description: note["desc"] as? String ?? "",
+                          author: (user["nickname"] as? String) ?? (user["nickName"] as? String) ?? "", images: images, video: videoURL)
+    }
+
+    private static func state(_ html: String) throws -> [String: Any] {
+        guard let start = html.range(of: "window.__INITIAL_STATE__"),
+              let equal = html.range(of: "=", range: start.upperBound..<html.endIndex),
+              let end = html.range(of: "</script>", range: equal.upperBound..<html.endIndex) else { throw FeedError.invalidResponse }
+        var raw = String(html[equal.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasSuffix(";") { raw.removeLast() }
+        raw = normalizeUndefined(in: raw)
+        guard let data = raw.data(using: .utf8),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw FeedError.invalidResponse }
+        return root
     }
 
     private static func normalizeUndefined(in input: String) -> String {
