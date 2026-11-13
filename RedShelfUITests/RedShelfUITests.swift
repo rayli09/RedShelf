@@ -146,6 +146,7 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(videoTab.waitForExistence(timeout: 15))
         XCUIRemote.shared.press(.up)
         for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.left) }
         XCTAssertTrue(videoTab.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["测试笔记 1"].waitForExistence(timeout: 10))
@@ -156,6 +157,46 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(next.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["测试笔记 2"].waitForExistence(timeout: 10))
+    }
+
+    func testPlayingVideoCanMoveToNextVideo() {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-reset-settings", "--ui-testing-playback-success"]
+        app.launch()
+        let videoTab = app.buttons["视频"]
+        XCTAssertTrue(videoTab.waitForExistence(timeout: 15))
+        XCUIRemote.shared.press(.up)
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.left) }
+        XCTAssertTrue(videoTab.hasFocus)
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["video.fixture.playing"].waitForExistence(timeout: 10))
+        let next = app.buttons["video.next"]
+        XCTAssertTrue(next.waitForExistence(timeout: 10))
+        for _ in 0..<3 where !next.hasFocus { XCUIRemote.shared.press(.down) }
+        for _ in 0..<4 where !next.hasFocus { XCUIRemote.shared.press(.right) }
+        XCTAssertTrue(next.hasFocus, "Next video must be reachable while playback is active")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["测试笔记 2"].waitForExistence(timeout: 10))
+        let instance = app.staticTexts["video.fixture.instance"]
+        XCTAssertTrue(instance.waitForExistence(timeout: 10))
+        let instanceBeforeControls = instance.label
+        let controls = app.buttons["video.controls"]
+        XCTAssertTrue(controls.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !controls.hasFocus { XCUIRemote.shared.press(.right) }
+        XCTAssertTrue(controls.hasFocus, "Native playback controls should be reachable")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.otherElements["Media Controls"].waitForExistence(timeout: 10))
+        let overlay = app.staticTexts["video.controls.open"]
+        XCTAssertTrue(overlay.waitForExistence(timeout: 10))
+        XCUIRemote.shared.press(.menu)
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 10), "Menu should return to the video feed")
+        XCTAssertEqual(instance.label, instanceBeforeControls, "Closing controls should not restart the video")
+        XCTAssertTrue(next.waitForExistence(timeout: 10))
+        let recommendations = app.buttons["推荐"]
+        XCUIRemote.shared.press(.up)
+        for _ in 0..<6 where !recommendations.hasFocus { XCUIRemote.shared.press(.left) }
+        XCTAssertTrue(recommendations.hasFocus, "Remote should leave the video tab")
     }
 
     func testProfileChangesPersonalCollection() {
@@ -244,6 +285,7 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(videoTab.waitForExistence(timeout: 15))
         XCUIRemote.shared.press(.up)
         for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.left) }
         XCTAssertTrue(videoTab.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["视频播放失败，请重试或查看下一个"].waitForExistence(timeout: 15))
@@ -258,6 +300,7 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(videoTab.waitForExistence(timeout: 15))
         XCUIRemote.shared.press(.up)
         for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.left) }
         XCTAssertTrue(videoTab.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["video.fixture.playing"].waitForExistence(timeout: 15), "Player did not advance")
@@ -291,6 +334,7 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(videoTab.waitForExistence(timeout: 15))
         XCUIRemote.shared.press(.up)
         for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.right) }
+        for _ in 0..<6 where !videoTab.hasFocus { XCUIRemote.shared.press(.left) }
         XCTAssertTrue(videoTab.hasFocus)
         XCUIRemote.shared.press(.select)
         XCTAssertTrue(app.staticTexts["video.fixture.autoplayOff"].waitForExistence(timeout: 10), "Autoplay setting was not retained")

@@ -575,12 +575,16 @@ private final class PlaybackModel: ObservableObject {
     private var failureObserver: NSObjectProtocol?
     #if DEBUG
     @Published private(set) var hasAdvanced = false
+    @Published private(set) var generation = 0
     private var timeObserver: Any?
     #endif
 
     func play(_ url: URL, automatically: Bool = true) {
         stop()
         failed = false
+        #if DEBUG
+        generation += 1
+        #endif
         let item = AVPlayerItem(url: url)
         let nextPlayer = AVPlayer(playerItem: item)
         player = nextPlayer
@@ -636,6 +640,7 @@ private struct VideoFeedView: View {
     @State private var error: String?
     @State private var loading = false
     @State private var retryGeneration = 0
+    @State private var showPlaybackControls = false
     @AppStorage("autoplayNoteVideos") private var autoplay = true
 
     private var videos: [FeedNote] { model.notes.filter(\.isVideo) }
@@ -647,6 +652,7 @@ private struct VideoFeedView: View {
             if let player = playback.player {
                 VideoPlayer(player: player)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             } else if loading {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let current {
@@ -669,6 +675,9 @@ private struct VideoFeedView: View {
                 if UIEnvironment.useFixtures && !autoplay {
                     Text("测试自动播放关闭").accessibilityIdentifier("video.fixture.autoplayOff")
                 }
+                if UIEnvironment.useFixtures {
+                    Text("测试播放实例 \(playback.generation)").accessibilityIdentifier("video.fixture.instance")
+                }
                 #endif
                 if let error = model.paginationError { Text(error).font(.callout).foregroundStyle(.secondary) }
                 HStack {
@@ -687,6 +696,10 @@ private struct VideoFeedView: View {
                     if let current {
                         Button("笔记详情") { selectedNote = current }
                     }
+                    if playback.player != nil && !playback.failed {
+                        Button("播放控制") { showPlaybackControls = true }
+                            .accessibilityIdentifier("video.controls")
+                    }
                     if error != nil || playback.failed {
                         Button("重试播放") { retryGeneration += 1 }
                     }
@@ -704,15 +717,32 @@ private struct VideoFeedView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
             .padding(48)
         }
+        .fullScreenCover(isPresented: $showPlaybackControls) {
+            if let player = playback.player {
+                ZStack {
+                    VideoPlayer(player: player).ignoresSafeArea()
+                    #if DEBUG
+                    if UIEnvironment.useFixtures {
+                        Text("测试播放控制").accessibilityIdentifier("video.controls.open")
+                    }
+                    #endif
+                }.onExitCommand { showPlaybackControls = false }
+            }
+        }
         .task(id: "\(current?.id ?? ""):\(isActive):\(retryGeneration)") {
             if isActive { await loadCurrent() } else { playback.stop() }
         }
+        .onPlayPauseCommand {
+            guard !showPlaybackControls, let player = playback.player else { return }
+            if player.rate == 0 { player.play() } else { player.pause() }
+        }
         .onChange(of: videos.count) { count in if index >= count { index = max(0, count - 1) } }
-        .onDisappear { playback.stop() }
+        .onDisappear { if !showPlaybackControls { playback.stop() } }
     }
 
     @MainActor
     private func loadCurrent() async {
+        showPlaybackControls = false
         playback.stop()
         error = nil
         guard let note = current else { return }
