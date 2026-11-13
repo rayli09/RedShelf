@@ -146,6 +146,18 @@ final class FeedParserTests: XCTestCase {
         XCTAssertEqual(note.accessToken, "inner-token")
     }
 
+    func testCommentPaginationDeduplicatesAndStopsOnNoProgress() throws {
+        let raw: [String: Any] = ["comments": [["id": "a", "content": "评论", "sub_comment_count": "2"], ["id": "a", "content": "重复"], ["id": "b"]], "cursor": "next", "has_more": true]
+        let page = try FeedParser.parseComments(raw)
+        XCTAssertEqual(page.comments.first?.replyCount, "2")
+        let first = page.merging(with: [], previousCursor: "")
+        XCTAssertEqual(first.comments.map(\.id), ["a", "b"])
+        XCTAssertTrue(first.hasMore)
+        let duplicate = page.merging(with: first.comments, previousCursor: "next")
+        XCTAssertEqual(duplicate.comments.count, 2)
+        XCTAssertFalse(duplicate.hasMore)
+    }
+
     func testAuthenticatedNoteDetailReadsImagesAndVideo() throws {
         let result: [String: Any] = ["items": [["note_card": ["title": "测试",
             "desc": "内容", "user": ["nickname": "作者"], "interact_info": ["liked": true, "collected": false, "comment_count": "8"],

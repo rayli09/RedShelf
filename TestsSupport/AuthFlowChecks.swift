@@ -649,6 +649,11 @@ private struct AuthFlowChecks {
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
                 try expect(query.contains { $0.name == "xsec_token" && $0.value == "a+b/c=" }, "comments corrupted token")
                 return (200, #"{"success":true,"data":{"comments":[{"id":"comment-1","content":"评论","user_info":{"nickname":"读者"}}],"cursor":"","has_more":false}}"#)
+            case "/api/sns/web/v2/comment/sub/page":
+                let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                try expect(query.contains { $0.name == "root_comment_id" && $0.value == "comment-1" }, "reply root missing")
+                try expect(query.contains { $0.name == "xsec_token" && $0.value == "a+b/c=" }, "reply token corrupted")
+                return (200, #"{"success":true,"data":{"comments":[{"id":"reply-1","content":"回复"}],"cursor":"","has_more":false}}"#)
             case "/api/sns/web/v1/search/notes":
                 try expect(request.value(forHTTPHeaderField: "x-rap-param")?.isEmpty == false, "search lacks risk parameter")
                 let body = try JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any]
@@ -712,6 +717,8 @@ private struct AuthFlowChecks {
         try expect(detail.title == "标题" && detail.images.count == 1 && detail.video != nil, "detail not parsed")
         let comments = try await client.comments(for: feed.notes[0])
         try expect(comments.comments.first?.content == "评论", "comments not parsed")
+        let replies = try await client.replies(for: feed.notes[0], rootID: "comment-1")
+        try expect(replies.comments.first?.content == "回复", "replies not parsed")
         let searchID = try await client.newSearchID()
         let search = try await client.searchNotes(keyword: "猫", type: 1, page: 1, searchID: searchID)
         try expect(search.hasMore && search.notes.first?.source == "pc_search", "search source or pagination lost")

@@ -299,6 +299,15 @@ actor SignedClient {
         return try FeedParser.parseComments(try await call(method: "GET", uri: uri, body: ""))
     }
 
+    func replies(for note: FeedNote, rootID: String, cursor: String = "") async throws -> CommentPage {
+        guard authenticated, !note.accessToken.isEmpty, !rootID.isEmpty else { throw FeedError.unavailable }
+        let uri = try queryURI(path: "/api/sns/web/v2/comment/sub/page", parameters: [
+            "note_id": note.id, "root_comment_id": rootID, "num": "10", "cursor": cursor,
+            "image_formats": "jpg,webp,avif", "top_comment_id": "", "xsec_token": note.accessToken,
+        ])
+        return try FeedParser.parseComments(await call(method: "GET", uri: uri, body: ""))
+    }
+
     func setLiked(_ value: Bool, noteID: String) async throws {
         guard authenticated, !noteID.isEmpty else { throw FeedError.unavailable }
         let body = try JSONEncoder().encode(["note_oid": noteID])

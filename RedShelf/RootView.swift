@@ -1292,21 +1292,7 @@ private struct NoteDetailView: View {
                         Text("暂无评论").font(.callout).foregroundStyle(.secondary)
                     }
                     ForEach(comments) { comment in
-                        HStack(alignment: .top, spacing: 14) {
-                            AsyncImage(url: comment.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
-                                .frame(width: 46, height: 46).clipShape(Circle())
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(comment.author).font(.callout).foregroundStyle(.secondary)
-                                Text(comment.content).font(.body)
-                                if !comment.likes.isEmpty { Label(comment.likes, systemImage: "heart").font(.caption).foregroundStyle(.secondary) }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(20)
-                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
-                        .focusable()
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("comment.\(comment.id)")
+                        CommentThreadView(comment: comment, note: note)
                     }
                     if commentsLoading { ProgressView() }
                     if commentsHaveMore && !commentsLoading && commentsError == nil {
@@ -1350,7 +1336,7 @@ private struct NoteDetailView: View {
         .task {
             if UIEnvironment.useFixtures {
                 if ProcessInfo.processInfo.arguments.contains("--ui-testing-detail-images") {
-                    comments = [NoteComment(id: "fixture-comment", author: "测试读者", avatar: nil, content: "测试评论", likes: "1")]
+                    comments = [NoteComment(id: "fixture-comment", author: "测试读者", avatar: nil, content: "测试评论", likes: "1", replyCount: "2")]
                 }
                 commentsLoaded = true
                 return
@@ -1391,14 +1377,80 @@ private struct NoteDetailView: View {
         defer { commentsLoading = false }
         do {
             let page = try await client.comments(for: note, cursor: commentCursor)
-            let existingIDs = Set(comments.map(\.id))
-            comments.append(contentsOf: page.comments.filter { !existingIDs.contains($0.id) })
-            commentsHaveMore = page.hasMore && !page.cursor.isEmpty && page.cursor != commentCursor
+            let merged = page.merging(with: comments, previousCursor: commentCursor)
+            comments = merged.comments
+            commentsHaveMore = merged.hasMore
             commentCursor = page.cursor
             commentsLoaded = true
         } catch is CancellationError {
             return
         } catch { commentsError = "暂时无法加载评论" }
+    }
+}
+
+private struct CommentThreadView: View {
+    let comment: NoteComment
+    let note: FeedNote
+    @State private var replies: [NoteComment] = []
+    @State private var cursor = ""
+    @State private var hasMore = false
+    @State private var loaded = false
+    @State private var loading = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            commentRow(comment)
+                .focusable().accessibilityElement(children: .combine)
+                .accessibilityIdentifier("comment.\(comment.id)")
+            ForEach(replies) { reply in
+                commentRow(reply).padding(.leading, 42).focusable().accessibilityElement(children: .combine)
+            }
+            if loaded && replies.isEmpty && !loading && error == nil { Text("暂无回复").font(.callout).foregroundStyle(.secondary) }
+            if let error { Text(error).font(.callout).foregroundStyle(.secondary) }
+            if loading { ProgressView() }
+            else if error != nil || hasMore || (!loaded && !comment.replyCount.isEmpty && comment.replyCount != "0") {
+                Button(error != nil ? "重试回复" : (loaded ? "加载更多回复" : "查看回复 \(comment.replyCount)")) {
+                    Task { await loadReplies() }
+                }.accessibilityIdentifier("comment.replies.\(comment.id)")
+            }
+        }
+    }
+
+    private func commentRow(_ item: NoteComment) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            AsyncImage(url: item.avatar) { image in image.resizable().scaledToFill() } placeholder: { Color.white.opacity(0.1) }
+                .frame(width: 46, height: 46).clipShape(Circle())
+            VStack(alignment: .leading, spacing: 8) {
+                Text(item.author).font(.callout).foregroundStyle(.secondary)
+                Text(item.content).font(.body)
+                if !item.likes.isEmpty { Label(item.likes, systemImage: "heart").font(.caption).foregroundStyle(.secondary) }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    @MainActor private func loadReplies() async {
+        guard !loading else { return }
+        if UIEnvironment.useFixtures {
+            replies = [NoteComment(id: "fixture-reply", author: "测试回复者", avatar: nil, content: "测试回复", likes: "")]
+            loaded = true
+            return
+        }
+        loading = true
+        error = nil
+        defer { loading = false }
+        do {
+            guard let client = SignedClient.shared else { throw FeedError.unavailable }
+            let page = try await client.replies(for: note, rootID: comment.id, cursor: cursor)
+            try Task.checkCancellation()
+            let merged = page.merging(with: replies, previousCursor: cursor)
+            replies = merged.comments
+            hasMore = merged.hasMore
+            cursor = page.cursor
+            loaded = true
+        } catch is CancellationError { return }
+        catch { if !Task.isCancelled { self.error = "暂时无法加载回复" } }
     }
 }
 

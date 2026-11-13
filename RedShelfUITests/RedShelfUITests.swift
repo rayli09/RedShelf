@@ -47,6 +47,12 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(comment.waitForExistence(timeout: 10))
         for _ in 0..<6 where !comment.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(comment.hasFocus, "Comments should be reachable using the remote")
+        let replies = app.buttons["comment.replies.fixture-comment"]
+        XCTAssertTrue(replies.waitForExistence(timeout: 10))
+        for _ in 0..<3 where !replies.hasFocus { XCUIRemote.shared.press(.down) }
+        XCTAssertTrue(replies.hasFocus, "Reply action should be reachable")
+        XCUIRemote.shared.press(.select)
+        XCTAssertTrue(app.staticTexts["测试回复"].waitForExistence(timeout: 10))
     }
 
     func testSearchTabShowsNativeSearchField() {

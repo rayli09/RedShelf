@@ -31,12 +31,23 @@ struct NoteComment: Identifiable, Equatable {
     let avatar: URL?
     let content: String
     let likes: String
+    let replyCount: String
+
+    init(id: String, author: String, avatar: URL?, content: String, likes: String, replyCount: String = "") {
+        self.id = id; self.author = author; self.avatar = avatar; self.content = content; self.likes = likes; self.replyCount = replyCount
+    }
 }
 
 struct CommentPage {
     let comments: [NoteComment]
     let cursor: String
     let hasMore: Bool
+
+    func merging(with existing: [NoteComment], previousCursor: String) -> (comments: [NoteComment], hasMore: Bool) {
+        var seen = Set(existing.map(\.id))
+        let fresh = comments.filter { seen.insert($0.id).inserted }
+        return (existing + fresh, hasMore && !cursor.isEmpty && cursor != previousCursor && !fresh.isEmpty)
+    }
 }
 
 struct SearchPage {
@@ -171,7 +182,8 @@ enum FeedParser {
             return NoteComment(id: id, author: user["nickname"] as? String ?? "",
                                avatar: (user["image"] as? String).flatMap(URL.init(string:)),
                                content: comment["content"] as? String ?? "",
-                               likes: (count as? String) ?? (count as? NSNumber)?.stringValue ?? "")
+                               likes: (count as? String) ?? (count as? NSNumber)?.stringValue ?? "",
+                               replyCount: countString(comment["sub_comment_count"]))
         }
         return CommentPage(comments: parsed, cursor: result["cursor"] as? String ?? "",
                            hasMore: result["has_more"] as? Bool ?? false)
