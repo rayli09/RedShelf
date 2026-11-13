@@ -370,6 +370,7 @@ actor SignedClient {
     }
 
     func beginLogin() async throws -> LoginChallenge {
+        sessionGeneration += 1
         lastLoggedQRStatus = nil
         log("event=begin_login")
         if !authenticated {
@@ -384,16 +385,28 @@ actor SignedClient {
     }
 
     private func activateGuest() async throws {
+        let previousCookies = cookies
+        let previousSessionKey = sessionKey
+        let currentGeneration = sessionGeneration
         let exchange = try SessionKeyExchange(serverPublicKey: sessionKeyServerPublicKey)
         let payload = try JSONEncoder().encode(["client_public_key_base64": exchange.publicKeyBase64])
         guard let body = String(data: payload, encoding: .utf8) else { throw LoginRequestError.malformed }
-        let guest = try await call(method: "POST", uri: "/api/sns/web/v1/login/activate", body: body)
-        applySession(from: guest)
-        guard let encrypted = guest["ssk"] as? String, !encrypted.isEmpty else { throw LoginRequestError.malformed }
-        let key = try exchange.decrypt(encrypted)
-        try signer.setSessionKey(key)
-        sessionKey = key
-        log("event=guest_session_key_ready")
+        do {
+            let guest = try await call(method: "POST", uri: "/api/sns/web/v1/login/activate", body: body)
+            applySession(from: guest)
+            guard let encrypted = guest["ssk"] as? String, !encrypted.isEmpty else { throw LoginRequestError.malformed }
+            let key = try exchange.decrypt(encrypted)
+            try signer.setSessionKey(key)
+            sessionKey = key
+            log("event=guest_session_key_ready")
+        } catch {
+            if sessionGeneration == currentGeneration {
+                cookies = previousCookies
+                sessionKey = previousSessionKey
+                try? signer.setSessionKey(previousSessionKey)
+            }
+            throw error
+        }
     }
 
     func checkLogin(_ challenge: LoginChallenge) async throws -> LoginProgress {

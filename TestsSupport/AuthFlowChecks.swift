@@ -21,6 +21,25 @@ private final class MockServer: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class ConcurrentMockServer: URLProtocol {
+    static var handler: ((URLRequest) throws -> (Int, String))?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        DispatchQueue.global().async { [self] in
+            do {
+                guard let handler = Self.handler, let url = request.url else { throw FeedError.invalidResponse }
+                let (status, body) = try handler(request)
+                let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(body.utf8))
+                client?.urlProtocolDidFinishLoading(self)
+            } catch { client?.urlProtocol(self, didFailWithError: error) }
+        }
+    }
+    override func stopLoading() {}
+}
+
 private enum TestFailure: Error { case unexpectedRequest, failed(String) }
 private func expect(_ condition: Bool, _ message: String) throws {
     if !condition { throw TestFailure.failed(message) }
@@ -113,6 +132,7 @@ private struct AuthFlowChecks {
         try await riskErrorIsActionableAndRedacted()
         try await guestIdentityMustNotPersist()
         try await invalidGuestKeyStopsLogin()
+        try await newLoginInvalidatesOldActivation()
         try await restoredSessionRetainsItsSigningKey()
         try await localSignOutClearsSession()
         try await signOutInvalidatesInFlightResponse()
@@ -627,23 +647,81 @@ private struct AuthFlowChecks {
 
     private static func invalidGuestKeyStopsLogin() async throws {
         var createdQR = false
+        var activations = 0
+        MockServer.responseHeaders = { _ in ["Set-Cookie": "web_session=bad-header; Domain=.xiaohongshu.com; Path=/; Secure"] }
+        defer { MockServer.responseHeaders = nil }
         MockServer.handler = { request in
             switch request.url?.path {
-            case "/api/sns/web/v1/login/activate": return (200, #"{"success":true,"data":{"session":"guest","ssk":"invalid"}}"#)
+            case "/api/sns/web/v1/login/activate":
+                activations += 1
+                try expect(request.value(forHTTPHeaderField: "Cookie")?.contains("web_session=original") == true,
+                           "failed activation left a stale guest session")
+                return (200, #"{"success":true,"data":{"session":"bad-body","ssk":"invalid"}}"#)
             case "/api/sns/web/v1/login/qrcode/create":
                 createdQR = true
                 return (200, #"{"success":true,"data":{"qr_id":"id","code":"code","url":"xhsdiscover://login"}}"#)
             default: throw TestFailure.unexpectedRequest
             }
         }
-        let client = try makeClient { _ in throw TestFailure.failed("must not persist") }
-        do {
-            _ = try await client.beginLogin()
-            throw TestFailure.failed("invalid guest key accepted")
-        } catch is TestFailure { throw TestFailure.failed("invalid guest key accepted") }
-        catch { }
-        try expect(!createdQR, "invalid guest key must stop before creating a QR")
+        let client = try makeClient(cookies: ["a1": "test", "webId": "test", "web_session": "original"]) { _ in throw TestFailure.failed("must not persist") }
+        for _ in 0..<2 {
+            do {
+                _ = try await client.beginLogin()
+                throw TestFailure.failed("invalid guest key accepted")
+            } catch is TestFailure { throw TestFailure.failed("invalid guest key accepted") }
+            catch { }
+        }
+        try expect(activations == 2 && !createdQR, "invalid guest key must stop before creating a QR")
         try expect(!(await client.isLoggedIn), "invalid guest key must not authenticate")
+    }
+
+    private static func newLoginInvalidatesOldActivation() async throws {
+        let started = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let serverKey = Curve25519.KeyAgreement.PrivateKey()
+        let guestKey = Data(repeating: 0x41, count: 32)
+        let lock = NSLock()
+        var activations = 0
+        ConcurrentMockServer.handler = { request in
+            switch request.url?.path {
+            case "/api/sns/web/v1/login/activate":
+                lock.lock(); activations += 1; let attempt = activations; lock.unlock()
+                if attempt == 1 {
+                    started.signal()
+                    guard release.wait(timeout: .now() + 10) == .success else { throw TestFailure.failed("old activation not released") }
+                    return (200, #"{"success":true,"data":{"session":"old","ssk":"invalid"}}"#)
+                }
+                let body = try JSONSerialization.jsonObject(with: requestBody(request)) as? [String: String]
+                guard let encoded = body?["client_public_key_base64"], let bytes = Data(base64Encoded: encoded) else { throw TestFailure.unexpectedRequest }
+                let secret = try serverKey.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: bytes))
+                let key = secret.withUnsafeBytes { SymmetricKey(data: Data($0)) }
+                let box = try AES.GCM.seal(guestKey, using: key)
+                let encrypted = (Data(box.nonce) + box.ciphertext + box.tag).base64EncodedString()
+                return (200, "{\"success\":true,\"data\":{\"session\":\"new\",\"ssk\":\"\(encrypted)\"}}")
+            case "/api/sns/web/v1/login/qrcode/create":
+                return (200, #"{"success":true,"data":{"qr_id":"id","code":"code","url":"xhsdiscover://login"}}"#)
+            case "/api/qrcode/userinfo":
+                try expect(request.value(forHTTPHeaderField: "Cookie")?.contains("web_session=new") == true, "old activation overwrote new session")
+                try verifySessionProof(request, key: guestKey)
+                return (200, #"{"success":true,"data":{"codeStatus":0}}"#)
+            default: throw TestFailure.unexpectedRequest
+            }
+        }
+        defer { ConcurrentMockServer.handler = nil }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ConcurrentMockServer.self]
+        config.httpShouldSetCookies = false
+        let script = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Generated/WebSigner.js")
+        let client = try SignedClient(session: URLSession(configuration: config), initialCookies: ["a1": "test", "webId": "test"], saveVault: { _ in throw TestFailure.failed("must not persist") }, signerScriptURL: script, sessionKeyServerPublicKey: serverKey.publicKey.rawRepresentation)
+        let old = Task { try await client.beginLogin() }
+        let ready = await Task.detached { started.wait(timeout: .now() + 5) == .success }.value
+        guard ready else { release.signal(); throw TestFailure.failed("old activation did not start") }
+        let challenge: LoginChallenge
+        do { challenge = try await client.beginLogin() }
+        catch { release.signal(); throw error }
+        release.signal()
+        do { _ = try await old.value; throw TestFailure.failed("old activation accepted") }
+        catch is CancellationError { }
+        guard case .waiting = try await client.checkLogin(challenge) else { throw TestFailure.failed("new challenge was not retained") }
     }
 
     private static func failedCompletionMustNotPersist() async throws {
