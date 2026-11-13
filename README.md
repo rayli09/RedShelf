@@ -32,4 +32,6 @@ The live-feed request and public room data shapes were studied using [`catbus`](
 
 For remote-control UI checks, install a tvOS Simulator runtime and run `xcodebuild test -scheme RedShelf -destination 'platform=tvOS Simulator,name=Apple TV 4K (3rd generation) (at 1080p)' -only-testing:RedShelfUITests`. UI tests use debug-only synthetic fixtures and do not access an account.
 
+To verify actual simulator Keychain storage, use the same destination with `-only-testing:RedShelfTests/SecureSessionTests`. This creates and deletes a uniquely named item containing only synthetic account data; it does not read the app's account vault.
+
 Settings includes a native control for automatic playback of note videos. It is enabled by default and stored locally; live streams are unaffected.

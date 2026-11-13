@@ -36,9 +36,12 @@ private enum LoginRequestError: LocalizedError {
     }
 }
 
-private enum SecureSession {
-    private static let service = "com.rayli.redshelf.session"
-    static func load() throws -> AccountVault? {
+struct SecureSession {
+    private let service: String
+
+    init(service: String = "com.rayli.redshelf.session") { self.service = service }
+
+    func load() throws -> AccountVault? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: "regional-accounts",
@@ -50,7 +53,7 @@ private enum SecureSession {
         return try JSONDecoder().decode(AccountVault.self, from: data)
     }
 
-    static func save(_ vault: AccountVault) throws {
+    func save(_ vault: AccountVault) throws {
         let data = try JSONEncoder().encode(vault)
         let key: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                   kSecAttrService as String: service,
@@ -65,6 +68,15 @@ private enum SecureSession {
         } else if status != errSecSuccess { throw FeedError.invalidResponse }
     }
 
+    #if DEBUG
+    func removeForTesting() throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: "regional-accounts"]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw FeedError.invalidResponse }
+    }
+    #endif
 }
 
 private final class RestrictedRedirects: NSObject, URLSessionTaskDelegate {
@@ -121,9 +133,10 @@ actor SignedClient {
         configuration.httpCookieStorage = nil
         session = suppliedSession ?? URLSession(configuration: configuration, delegate: RestrictedRedirects(), delegateQueue: nil)
         signer = try WebSigner(scriptURL: signerScriptURL)
-        self.saveVault = saveVault ?? SecureSession.save
+        let secureSession = SecureSession()
+        self.saveVault = saveVault ?? secureSession.save
         if let initialVault { vault = initialVault }
-        else if initialCookies == nil { vault = try SecureSession.load() ?? AccountVault() }
+        else if initialCookies == nil { vault = try secureSession.load() ?? AccountVault() }
         else { vault = AccountVault() }
         self.sessionKeyServerPublicKey = sessionKeyServerPublicKey
         if let initialCookies {
