@@ -47,10 +47,6 @@ final class RedShelfUITests: XCTestCase {
         XCTAssertTrue(comment.waitForExistence(timeout: 10))
         for _ in 0..<6 where !comment.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(comment.hasFocus, "Comments should be reachable using the remote")
-        let capture = XCTAttachment(screenshot: app.screenshot())
-        capture.name = "Detail fixture"
-        capture.lifetime = .keepAlways
-        add(capture)
     }
 
     func testSearchTabShowsNativeSearchField() {
@@ -285,10 +281,6 @@ final class RedShelfUITests: XCTestCase {
         XCUIRemote.shared.press(.select)
         let room = app.buttons["live.123"]
         XCTAssertTrue(room.waitForExistence(timeout: 10))
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Live grid fixture"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
         if !room.hasFocus { XCUIRemote.shared.press(.down) }
         if !room.hasFocus { XCUIRemote.shared.press(.down) }
         XCTAssertTrue(room.hasFocus)
