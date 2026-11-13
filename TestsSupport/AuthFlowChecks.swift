@@ -103,6 +103,7 @@ private struct AuthFlowChecks {
     static func main() async throws {
         try await successfulConfirmation()
         try await confirmedPollCanEstablishVerifiedSession()
+        try await verifyAccountAfterCompletionFailure()
         try await overseasConfirmationUsesIsolatedRegion()
         try await overseasFailureRestoresDomesticGuest()
         try await overseasGuestIsNeverSavedAsAccount()
@@ -393,6 +394,47 @@ private struct AuthFlowChecks {
         catch is TestFailure { throw TestFailure.failed("wrong account authenticated") }
         catch { }
         try expect(!mismatchedSaved, "unverified poll session was saved")
+    }
+
+    private static func verifyAccountAfterCompletionFailure() async throws {
+        let challenge = LoginChallenge(id: "id", code: "code", url: URL(string: "xhsdiscover://login")!)
+        for returnedIdentity in ["expected", "other", "guest"] {
+            var profileChecks = 0
+            var saved: StoredSession?
+            MockServer.handler = { request in
+                switch request.url?.path {
+                case "/api/qrcode/userinfo": return (200, #"{"success":true,"data":{"codeStatus":2,"userId":"expected"}}"#)
+                case "/api/sns/web/v1/login/qrcode/status": return (200, #"{"success":false,"code":-1}"#)
+                case "/api/sns/web/v2/user/me":
+                    profileChecks += 1
+                    if profileChecks == 1 || returnedIdentity == "guest" {
+                        return (200, #"{"success":true,"data":{"guest":true,"user_id":"expected"}}"#)
+                    }
+                    return (200, "{\"success\":true,\"data\":{\"guest\":false,\"user_id\":\"\(returnedIdentity)\"}}")
+                default: throw TestFailure.unexpectedRequest
+                }
+            }
+            let client = try makeClient(cookies: ["a1": "test", "webId": "test", "web_session": "guest"]) { saved = $0 }
+            if returnedIdentity == "expected" {
+                guard case .authenticated = try await client.checkLogin(challenge) else { throw TestFailure.failed("verified account not accepted") }
+                try expect(saved != nil, "verified account was not saved")
+            } else {
+                do { _ = try await client.checkLogin(challenge); throw TestFailure.failed("unverified account accepted") }
+                catch is TestFailure { throw TestFailure.failed("unverified account accepted") }
+                catch { }
+                try expect(saved == nil, "unverified account was saved")
+            }
+            try expect(profileChecks == 2, "completion error did not trigger identity verification")
+            if returnedIdentity == "expected" {
+                profileChecks = 0
+                let failing = try makeClient(cookies: ["a1": "test", "webId": "test", "web_session": "guest"]) { _ in
+                    throw TestFailure.failed("save failed")
+                }
+                do { _ = try await failing.checkLogin(challenge); throw TestFailure.failed("save failure ignored") }
+                catch TestFailure.failed(let message) where message == "save failed" { }
+                try expect(!(await failing.isLoggedIn), "save failure authenticated the account")
+            }
+        }
     }
 
     private static func profileIdentityAndNameAreSafe() async throws {

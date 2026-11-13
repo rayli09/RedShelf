@@ -486,6 +486,24 @@ actor SignedClient {
                 catch is CancellationError { throw CancellationError() }
                 catch let error as LoginRequestError {
                     log("event=completion_request_failed")
+                    if case .risk = error { throw error }
+                    // The web client checks the resulting login state even when
+                    // the completion request fails. Never accept a guest or a
+                    // different account as proof of this QR confirmation.
+                    var verified = false
+                    do {
+                        let profile = try await call(method: "GET", uri: "/api/sns/web/v2/user/me", body: "")
+                        verified = userID(in: profile) == confirmedUserID
+                    } catch is CancellationError { throw CancellationError() }
+                    catch let verificationError as LoginRequestError {
+                        if case .risk = verificationError { throw verificationError }
+                    } catch { }
+                    if verified {
+                        try Task.checkCancellation()
+                        try persistVerifiedSession(userID: confirmedUserID)
+                        log("event=login_verified_after_completion_error")
+                        return .authenticated
+                    }
                     throw LoginRequestError.completion(error.errorDescription)
                 }
                 catch {
