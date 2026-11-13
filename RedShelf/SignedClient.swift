@@ -454,11 +454,14 @@ actor SignedClient {
                     var verified = false
                     do {
                         let profile = try await call(method: "GET", uri: "/api/sns/web/v2/user/me", body: "")
-                        verified = userID(in: profile) == confirmedUserID
+                        let profileID = userID(in: profile)
+                        verified = profileID == confirmedUserID
+                        log("event=poll_identity_check result=\(verified ? "matched" : profileID == nil ? "guest_or_missing" : "different_account")")
                     } catch is CancellationError { throw CancellationError() }
                     catch let error as LoginRequestError {
                         if case .risk = error { throw error }
-                    } catch { }
+                        log("event=poll_identity_check result=request_failed")
+                    } catch { log("event=poll_identity_check result=request_failed") }
                     if verified {
                         try Task.checkCancellation()
                         try persistVerifiedSession(userID: confirmedUserID)
@@ -493,11 +496,14 @@ actor SignedClient {
                     var verified = false
                     do {
                         let profile = try await call(method: "GET", uri: "/api/sns/web/v2/user/me", body: "")
-                        verified = userID(in: profile) == confirmedUserID
+                        let profileID = userID(in: profile)
+                        verified = profileID == confirmedUserID
+                        log("event=completion_identity_check result=\(verified ? "matched" : profileID == nil ? "guest_or_missing" : "different_account")")
                     } catch is CancellationError { throw CancellationError() }
                     catch let verificationError as LoginRequestError {
                         if case .risk = verificationError { throw verificationError }
-                    } catch { }
+                        log("event=completion_identity_check result=request_failed")
+                    } catch { log("event=completion_identity_check result=request_failed") }
                     if verified {
                         try Task.checkCancellation()
                         try persistVerifiedSession(userID: confirmedUserID)
